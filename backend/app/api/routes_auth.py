@@ -38,6 +38,7 @@ class UserInfo(BaseModel):
     full_name: str
     profession: str
     organization: str
+    role: str = "user"
 
     class Config:
         from_attributes = True

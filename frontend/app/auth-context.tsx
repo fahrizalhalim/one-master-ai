@@ -10,6 +10,7 @@ export type User = {
   full_name: string;
   profession: string;
   organization: string;
+  role?: string;
 };
 
 type AuthState = {
@@ -112,4 +113,9 @@ export function useAuth() {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth harus dipakai di dalam AuthProvider");
   return ctx;
+}
+
+/** Admin panel route helper: jika user.role admin, tampilkan link ke /admin */
+export function isAdmin(user: { role?: string } | null): boolean {
+  return user?.role === "admin";
 }

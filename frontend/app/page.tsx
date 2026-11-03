@@ -172,12 +172,22 @@ export default function Home() {
             <p className="mb-2 truncate text-xs text-gray-400">
               {user.full_name || user.email}
             </p>
-            <button
-              onClick={logout}
-              className="w-full rounded-lg border border-gray-700 py-2 text-sm text-gray-300 hover:bg-gray-800"
-            >
-              Keluar
-            </button>
+            <div className="flex flex-col gap-2">
+              {user.role === "admin" && (
+                <a
+                  href="/admin"
+                  className="rounded-lg border border-amber-600/50 py-2 text-center text-sm text-amber-300 hover:bg-amber-900/30"
+                >
+                  👑 Panel Admin
+                </a>
+              )}
+              <button
+                onClick={logout}
+                className="w-full rounded-lg border border-gray-700 py-2 text-sm text-gray-300 hover:bg-gray-800"
+              >
+                Keluar
+              </button>
+            </div>
           </div>
         </div>
       </aside>

@@ -19,6 +19,7 @@ class User(Base):
     profession: Mapped[str] = mapped_column(String(100), default="umum")
     organization: Mapped[str] = mapped_column(String(255), default="")
     is_active: Mapped[bool] = mapped_column(default=True)
+    role: Mapped[str] = mapped_column(String(20), default="user", index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )
