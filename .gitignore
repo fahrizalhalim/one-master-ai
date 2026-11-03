@@ -22,3 +22,4 @@ node_modules/
 backend/storage/*
 !backend/storage/.gitkeep
 backend/storage/uploads/*
+backend/storage/uploads/*
