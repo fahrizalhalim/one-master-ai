@@ -35,6 +35,8 @@ JWT_SECRET_KEY = _get(
     "JWT_SECRET_KEY",
     "ubah-ini-di-env-produksi-58f8b3c1",
 )
+# Batas chat per user per hari (rate limiting biaya AI). 0 = tanpa batas.
+DAILY_CHAT_LIMIT = int(_get("DAILY_CHAT_LIMIT", "50"))
 
 APP_NAME = "ONE MASTER AI"
 APP_VERSION = "0.1.0"

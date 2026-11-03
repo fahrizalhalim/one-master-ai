@@ -1,10 +1,14 @@
 """Chat dengan penyimpanan riwayat percakapan per user."""
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
+from app.core.config import DAILY_CHAT_LIMIT
 from app.models.conversation import Conversation, Message
 from app.models.database import get_db
 from app.models.token_usage import TokenUsage
@@ -15,6 +19,42 @@ router = APIRouter(prefix="/api/v1", tags=["chat"])
 
 # Jumlah pesan terakhir yang dikirim sebagai konteks ke AI
 HISTORY_LIMIT = 10
+
+
+def daily_quota(db: Session, user: User) -> tuple[int, int]:
+    """Kembalikan (batas, terpakai hari ini). Admin = tanpa batas (0)."""
+    if user.role == "admin":
+        return 0, 0
+    limit = DAILY_CHAT_LIMIT
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    used = (
+        db.query(func.count(TokenUsage.id))
+        .filter(
+            TokenUsage.user_id == user.id,
+            TokenUsage.created_at >= today_start,
+        )
+        .scalar()
+    )
+    return limit, int(used or 0)
+
+
+@router.get("/quota")
+def my_quota(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Sisa kuota chat hari ini untuk user yang login."""
+    limit, used = daily_quota(db, current_user)
+    if limit == 0:
+        return {"limit": 0, "used": used, "remaining": None, "unlimited": True}
+    return {
+        "limit": limit,
+        "used": used,
+        "remaining": max(0, limit - used),
+        "unlimited": False,
+    }
 
 
 class ChatRequest(BaseModel):
@@ -59,6 +99,17 @@ def chat(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # Rate limiting: batas chat per hari (kecuali admin)
+    limit, used = daily_quota(db, current_user)
+    if limit > 0 and used >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Kuota harian habis ({used}/{limit} chat). "
+                "Kuota reset otomatis besok pagi. Hubungi admin bila butuh penambahan."
+            ),
+        )
+
     # Ambil atau buat percakapan
     if data.conversation_id:
         conv = _get_own_conversation(db, data.conversation_id, current_user)

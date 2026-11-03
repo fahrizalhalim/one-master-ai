@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/app/auth-context";
 import DownloadButtons from "@/app/download-buttons";
@@ -29,7 +29,30 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [attached, setAttached] = useState<AttachedFile | null>(null);
+  const [quota, setQuota] = useState<{
+    limit: number;
+    used: number;
+    remaining: number | null;
+    unlimited: boolean;
+  } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Muat kuota chat harian
+  const loadQuota = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await fetch(`${API_URL}/api/v1/quota`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setQuota(await res.json());
+    } catch {
+      /* kuota bersifat opsional */
+    }
+  }, [token]);
+
+  useEffect(() => {
+    if (token) loadQuota();
+  }, [token, loadQuota]);
 
   // Guard: belum login -> ke /login
   useEffect(() => {
@@ -100,6 +123,7 @@ export default function Home() {
       ]);
       // Percakapan baru mungkin saja terbuat — refresh sidebar
       refresh();
+      loadQuota();
     } catch (err) {
       setMessages((m) => [
         ...m,
@@ -206,10 +230,34 @@ export default function Home() {
           <div className="w-16" />
         </header>
         <header className="hidden border-b border-gray-800 px-6 py-4 md:block">
-          <h1 className="text-xl font-bold tracking-tight">🤖 ONE MASTER AI</h1>
-          <p className="text-xs text-gray-400">
-            {user.full_name || user.email} · {user.profession}
-          </p>
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-xl font-bold tracking-tight">🤖 ONE MASTER AI</h1>
+              <p className="text-xs text-gray-400">
+                {user.full_name || user.email} · {user.profession}
+              </p>
+            </div>
+            {quota && !quota.unlimited && (
+              <div
+                className={`rounded-full px-4 py-1.5 text-xs font-medium ${
+                  quota.remaining === 0
+                    ? "bg-red-600/30 text-red-300"
+                    : quota.remaining !== null && quota.remaining <= 5
+                      ? "bg-amber-600/30 text-amber-300"
+                      : "bg-gray-800 text-gray-300"
+                }`}
+                title="Batas chat harian"
+              >
+                💬 Kuota hari ini: {quota.used}/{quota.limit}
+                {quota.remaining === 0 ? " — HABIS" : ` (sisa ${quota.remaining})`}
+              </div>
+            )}
+            {quota?.unlimited && (
+              <div className="rounded-full bg-gray-800 px-4 py-1.5 text-xs text-gray-300">
+                💬 Kuota: tanpa batas
+              </div>
+            )}
+          </div>
         </header>
 
         {/* Chat area */}
