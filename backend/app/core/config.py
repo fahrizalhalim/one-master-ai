@@ -37,6 +37,9 @@ JWT_SECRET_KEY = _get(
 )
 # Batas chat per user per hari (rate limiting biaya AI). 0 = tanpa batas.
 DAILY_CHAT_LIMIT = int(_get("DAILY_CHAT_LIMIT", "50"))
+# Dokumentasi API publik (/docs, /openapi.json). Default tertutup di produksi.
+# Set "true" hanya saat development lokal.
+API_DOCS_PUBLIC = _get("API_DOCS_PUBLIC", "false").lower() in ("1", "true", "yes")
 
 APP_NAME = "ONE MASTER AI"
 APP_VERSION = "0.1.0"
