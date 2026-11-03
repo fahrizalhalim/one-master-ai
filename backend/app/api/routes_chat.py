@@ -21,6 +21,9 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = Field(
         default=None, description="ID percakapan (kosong = mulai baru)"
     )
+    file_id: str | None = Field(
+        default=None, max_length=24, description="ID file terunggah sebagai konteks"
+    )
 
 
 class ChatResponse(BaseModel):
@@ -82,6 +85,26 @@ def chat(
         for m in history
     )
 
+    history_block = ""
+    if history_text:
+        history_block = f"Riwayat percakapan (terbaru di akhir):\n{history_text}\n"
+
+    # Konteks file terunggah (maks 6000 char agar prompt tidak membengkak)
+    file_block = ""
+    if data.file_id:
+        from app.api.routes_files import _user_dir
+
+        extract = _user_dir(current_user.id) / f"{data.file_id}.extract.txt"
+        if extract.exists():
+            text = extract.read_text(encoding="utf-8", errors="ignore")
+            file_block = (
+                "Pengguna melampirkan dokumen berikut. Gunakan isinya sebagai "
+                "konteks utama jawaban jika relevan:\n\n--- AWAL DOKUMEN ---\n"
+                f"{text[:6000]}\n--- AKHIR DOKUMEN ---\n"
+            )
+        else:
+            raise HTTPException(status_code=404, detail="Lampiran tidak ditemukan.")
+
     # Simpan pesan user
     _save_message(db, conv.id, "user", data.message)
 
@@ -93,6 +116,7 @@ def chat(
             user_message=data.message,
             profession=current_user.profession,
             history_text=history_text,
+            file_text=file_block,
         )
     except Exception:
         db.commit()

@@ -47,6 +47,7 @@ def master_agent(
     user_message: str,
     profession: str = "umum",
     history_text: str = "",
+    file_text: str = "",
 ) -> dict:
     skill = route_skill(user_message)
     skill_instruction = load_skill_instruction(skill)
@@ -59,6 +60,10 @@ def master_agent(
     if history_text:
         history_block = f"Riwayat percakapan (terbaru di akhir):\n{history_text}\n"
 
+    file_block = ""
+    if file_text:
+        file_block = f"{file_text}\n"
+
     instruction = f"""Anda adalah ONE MASTER AI, asisten pekerjaan profesional.
 
 Profesi pengguna: {profession}
@@ -67,6 +72,7 @@ Keahlian yang dipilih: {skill}
 {skill_block}
 
 {history_block}
+{file_block}
 Aturan umum:
 - Jawab secara profesional, sistematis, akurat dan sesuai konteks pekerjaan.
 - Jika data tidak tersedia, jelaskan data apa yang masih dibutuhkan.

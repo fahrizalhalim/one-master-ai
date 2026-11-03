@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/app/auth-context";
 import DownloadButtons from "@/app/download-buttons";
+import UploadButton, { type AttachedFile } from "@/app/upload-button";
 import { useConversations } from "@/app/use-conversations";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
@@ -27,6 +28,7 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [attached, setAttached] = useState<AttachedFile | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Guard: belum login -> ke /login
@@ -66,10 +68,15 @@ export default function Home() {
 
   async function send() {
     const text = input.trim();
-    if (!text || busy || !token) return;
+    if ((!text && !attached) || busy || !token) return;
 
-    setMessages((m) => [...m, { role: "user", content: text }]);
+    const displayText = attached
+      ? `📎 ${attached.filename}\n${text || "Analisis dokumen ini."}`
+      : text;
+    setMessages((m) => [...m, { role: "user", content: displayText }]);
     setInput("");
+    const fileId = attached?.id;
+    setAttached(null);
     setBusy(true);
 
     try {
@@ -80,8 +87,9 @@ export default function Home() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          message: text,
+          message: text || "Analisis dokumen ini.",
           conversation_id: activeId,
+          file_id: fileId,
         }),
       });
       const data = await res.json();
@@ -245,18 +253,24 @@ export default function Home() {
 
         {/* Input */}
         <div className="border-t border-gray-800 px-6 py-4">
-          <div className="flex gap-3">
+          <UploadButton
+            token={token}
+            attached={attached}
+            onAttached={setAttached}
+            onClear={() => setAttached(null)}
+          />
+          <div className="mt-3 flex gap-3">
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && send()}
-              placeholder="Tulis permintaan Anda…"
+              placeholder={attached ? `Tanya tentang "${attached.filename}"…` : "Tulis permintaan Anda…"}
               className="flex-1 rounded-xl border border-gray-700 bg-gray-900 px-4 py-3 outline-none focus:border-blue-500"
               disabled={busy}
             />
             <button
               onClick={send}
-              disabled={busy || !input.trim()}
+              disabled={busy || (!input.trim() && !attached)}
               className="rounded-xl bg-blue-600 px-6 py-3 font-medium hover:bg-blue-500 disabled:opacity-40"
             >
               Kirim
