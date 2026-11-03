@@ -1,6 +1,7 @@
+import os
 from pathlib import Path
 
-# Muat .env backend secara manual (tanpa dependensi tambahan).
+# Muat .env dari file (lokal) ATAU environment variable (Docker container).
 ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
 
 
@@ -16,12 +17,20 @@ def load_env() -> dict:
     return env
 
 
+def _get(key: str, default: str = "") -> str:
+    """Prioritas: environment variable (Docker) -> file .env (lokal) -> default."""
+    return os.environ.get(key) or _env.get(key, default)
+
+
 _env = load_env()
 
-OPENAI_API_KEY = _env.get("OPENAI_API_KEY", "")
-OPENAI_BASE_URL = _env.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-OPENAI_MODEL = _env.get("OPENAI_MODEL", "gpt-4o-mini")
-DATABASE_URL = _env.get("DATABASE_URL", "")
+OPENAI_API_KEY = _get("OPENAI_API_KEY")
+OPENAI_BASE_URL = _get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENAI_MODEL = _get("OPENAI_MODEL", "gpt-4o-mini")
+DATABASE_URL = _get(
+    "DATABASE_URL",
+    "postgresql+psycopg://onemaster:onemaster@db:5432/onemaster",
+)
 
 APP_NAME = "ONE MASTER AI"
 APP_VERSION = "0.1.0"
