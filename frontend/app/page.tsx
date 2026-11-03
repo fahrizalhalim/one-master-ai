@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/app/auth-context";
+import { useConversations } from "@/app/use-conversations";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -12,14 +13,55 @@ export default function Home() {
   const { token, user, loading, logout } = useAuth();
   const router = useRouter();
 
+  const {
+    conversations,
+    activeId,
+    refresh,
+    loadConversation,
+    newConversation,
+    deleteConversation,
+  } = useConversations(token);
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
 
   // Guard: belum login -> ke /login
   useEffect(() => {
     if (!loading && !token) router.replace("/login");
   }, [loading, token, router]);
+
+  // Auto-scroll ke bawah saat pesan baru
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, busy]);
+
+  async function pickConversation(id: string) {
+    const msgs = await loadConversation(id);
+    if (msgs) {
+      setMessages(
+        msgs.map((m) => ({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          skill: m.skill || undefined,
+        }))
+      );
+      setSidebarOpen(false);
+    }
+  }
+
+  function startNew() {
+    newConversation();
+    setMessages([]);
+    setSidebarOpen(false);
+  }
+
+  async function removeConversation(id: string) {
+    await deleteConversation(id);
+    setMessages([]);
+  }
 
   async function send() {
     const text = input.trim();
@@ -36,7 +78,10 @@ export default function Home() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({
+          message: text,
+          conversation_id: activeId,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Gagal memproses");
@@ -44,6 +89,8 @@ export default function Home() {
         ...m,
         { role: "assistant", content: data.answer, skill: data.skill },
       ]);
+      // Percakapan baru mungkin saja terbuat — refresh sidebar
+      refresh();
     } catch (err) {
       setMessages((m) => [
         ...m,
@@ -66,83 +113,147 @@ export default function Home() {
   }
 
   return (
-    <main className="flex h-screen flex-col bg-gray-950 text-gray-100">
-      {/* Header */}
-      <header className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
-        <div>
+    <main className="flex h-screen bg-gray-950 text-gray-100">
+      {/* Sidebar riwayat */}
+      <aside
+        className={`fixed inset-y-0 left-0 z-20 w-72 transform border-r border-gray-800 bg-gray-900 transition-transform md:static md:translate-x-0 ${
+          sidebarOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
+        <div className="flex h-full flex-col">
+          <div className="border-b border-gray-800 p-4">
+            <button
+              onClick={startNew}
+              className="w-full rounded-xl bg-blue-600 py-2.5 text-sm font-semibold hover:bg-blue-500"
+            >
+              ＋ Percakapan Baru
+            </button>
+          </div>
+          <nav className="flex-1 space-y-1 overflow-y-auto p-2">
+            {conversations.length === 0 && (
+              <p className="px-3 py-6 text-center text-xs text-gray-500">
+                Belum ada riwayat percakapan
+              </p>
+            )}
+            {conversations.map((c) => (
+              <div
+                key={c.id}
+                className={`group flex items-center gap-1 rounded-lg px-2 ${
+                  activeId === c.id ? "bg-gray-800" : "hover:bg-gray-800/60"
+                }`}
+              >
+                <button
+                  onClick={() => pickConversation(c.id)}
+                  className="flex-1 truncate py-2.5 text-left text-sm text-gray-300"
+                  title={c.title}
+                >
+                  {c.title}
+                </button>
+                <button
+                  onClick={() => removeConversation(c.id)}
+                  className="rounded p-1.5 text-gray-500 opacity-0 hover:text-red-400 group-hover:opacity-100"
+                  title="Hapus"
+                >
+                  🗑
+                </button>
+              </div>
+            ))}
+          </nav>
+          <div className="border-t border-gray-800 p-4">
+            <p className="mb-2 truncate text-xs text-gray-400">
+              {user.full_name || user.email}
+            </p>
+            <button
+              onClick={logout}
+              className="w-full rounded-lg border border-gray-700 py-2 text-sm text-gray-300 hover:bg-gray-800"
+            >
+              Keluar
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      {/* Area utama */}
+      <div className="flex flex-1 flex-col">
+        {/* Header */}
+        <header className="flex items-center justify-between border-b border-gray-800 px-4 py-3 md:hidden">
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="rounded-lg border border-gray-700 px-3 py-1.5 text-sm"
+          >
+            ☰ Riwayat
+          </button>
+          <h1 className="text-lg font-bold">🤖 ONE MASTER AI</h1>
+          <div className="w-16" />
+        </header>
+        <header className="hidden border-b border-gray-800 px-6 py-4 md:block">
           <h1 className="text-xl font-bold tracking-tight">🤖 ONE MASTER AI</h1>
           <p className="text-xs text-gray-400">
             {user.full_name || user.email} · {user.profession}
           </p>
-        </div>
-        <button
-          onClick={logout}
-          className="rounded-lg border border-gray-700 px-4 py-1.5 text-sm text-gray-300 hover:bg-gray-800"
-        >
-          Keluar
-        </button>
-      </header>
+        </header>
 
-      {/* Chat area */}
-      <div className="flex-1 space-y-4 overflow-y-auto px-6 py-6">
-        {messages.length === 0 && (
-          <div className="mx-auto mt-24 max-w-md text-center text-gray-500">
-            <p className="text-4xl">💬</p>
-            <p className="mt-3">
-              Selamat datang, {user.full_name || user.email}! Tulis permintaan
-              Anda — contoh: &quot;Buatkan RPS mata kuliah Algoritma dengan
-              pendekatan OBE&quot;
-            </p>
-          </div>
-        )}
-        {messages.map((m, i) => (
-          <div
-            key={i}
-            className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
-          >
+        {/* Chat area */}
+        <div className="flex-1 space-y-4 overflow-y-auto px-6 py-6">
+          {messages.length === 0 && (
+            <div className="mx-auto mt-24 max-w-md text-center text-gray-500">
+              <p className="text-4xl">💬</p>
+              <p className="mt-3">
+                Selamat datang, {user.full_name || user.email}! Tulis permintaan
+                Anda — percakapan otomatis tersimpan di riwayat.
+              </p>
+            </div>
+          )}
+          {messages.map((m, i) => (
             <div
-              className={`max-w-[75%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-                m.role === "user"
-                  ? "bg-blue-600 text-white"
-                  : "bg-gray-800 text-gray-100"
-              }`}
+              key={i}
+              className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
             >
-              {m.skill && (
-                <span className="mb-2 inline-block rounded-full bg-emerald-600/30 px-2 py-0.5 text-xs text-emerald-300">
-                  skill: {m.skill}
-                </span>
-              )}
-              <p>{m.content}</p>
+              <div
+                className={`max-w-[75%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                  m.role === "user"
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-800 text-gray-100"
+                }`}
+              >
+                {m.skill && (
+                  <span className="mb-2 inline-block rounded-full bg-emerald-600/30 px-2 py-0.5 text-xs text-emerald-300">
+                    skill: {m.skill}
+                  </span>
+                )}
+                <p>{m.content}</p>
+              </div>
             </div>
-          </div>
-        ))}
-        {busy && (
-          <div className="flex justify-start">
-            <div className="rounded-2xl bg-gray-800 px-4 py-3 text-sm text-gray-400">
-              Master AI sedang berpikir…
+          ))}
+          {busy && (
+            <div className="flex justify-start">
+              <div className="rounded-2xl bg-gray-800 px-4 py-3 text-sm text-gray-400">
+                Master AI sedang berpikir…
+              </div>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
 
-      {/* Input */}
-      <div className="border-t border-gray-800 px-6 py-4">
-        <div className="flex gap-3">
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && send()}
-            placeholder="Tulis permintaan Anda…"
-            className="flex-1 rounded-xl border border-gray-700 bg-gray-900 px-4 py-3 outline-none focus:border-blue-500"
-            disabled={busy}
-          />
-          <button
-            onClick={send}
-            disabled={busy || !input.trim()}
-            className="rounded-xl bg-blue-600 px-6 py-3 font-medium hover:bg-blue-500 disabled:opacity-40"
-          >
-            Kirim
-          </button>
+        {/* Input */}
+        <div className="border-t border-gray-800 px-6 py-4">
+          <div className="flex gap-3">
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && send()}
+              placeholder="Tulis permintaan Anda…"
+              className="flex-1 rounded-xl border border-gray-700 bg-gray-900 px-4 py-3 outline-none focus:border-blue-500"
+              disabled={busy}
+            />
+            <button
+              onClick={send}
+              disabled={busy || !input.trim()}
+              className="rounded-xl bg-blue-600 px-6 py-3 font-medium hover:bg-blue-500 disabled:opacity-40"
+            >
+              Kirim
+            </button>
+          </div>
         </div>
       </div>
     </main>

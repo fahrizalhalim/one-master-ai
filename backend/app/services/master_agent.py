@@ -43,13 +43,21 @@ def ask_ai(prompt: str) -> str:
         return response.choices[0].message.content
 
 
-def master_agent(user_message: str, profession: str = "umum") -> dict:
+def master_agent(
+    user_message: str,
+    profession: str = "umum",
+    history_text: str = "",
+) -> dict:
     skill = route_skill(user_message)
     skill_instruction = load_skill_instruction(skill)
 
     skill_block = ""
     if skill_instruction:
         skill_block = f"Instruksi keahlian ({skill}):\n{skill_instruction}"
+
+    history_block = ""
+    if history_text:
+        history_block = f"Riwayat percakapan (terbaru di akhir):\n{history_text}\n"
 
     instruction = f"""Anda adalah ONE MASTER AI, asisten pekerjaan profesional.
 
@@ -58,6 +66,7 @@ Keahlian yang dipilih: {skill}
 
 {skill_block}
 
+{history_block}
 Aturan umum:
 - Jawab secara profesional, sistematis, akurat dan sesuai konteks pekerjaan.
 - Jika data tidak tersedia, jelaskan data apa yang masih dibutuhkan.
