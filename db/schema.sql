@@ -44,6 +44,18 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Tabel user untuk autentikasi JWT (dibuat via SQLAlchemy create_all juga)
+CREATE TABLE IF NOT EXISTS users_jwt (
+    id VARCHAR(36) PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    full_name VARCHAR(255) DEFAULT '',
+    profession VARCHAR(100) DEFAULT 'umum',
+    organization VARCHAR(255) DEFAULT '',
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id);

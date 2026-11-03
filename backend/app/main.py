@@ -4,6 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes_auth import router as auth_router
 from app.api.routes_chat import router as chat_router
 from app.core.config import APP_NAME, APP_VERSION
+from app.models.database import Base, engine
+from app.models.user import User  # noqa: F401 — pastikan model terdaftar
+
+# Buat tabel otomatis saat startup (untuk tabel baru seperti users_jwt)
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title=APP_NAME,
