@@ -10,6 +10,7 @@ from app.api.routes_admin import router as admin_router
 from app.core.config import APP_NAME, APP_VERSION
 from app.models.conversation import Conversation, Message  # noqa: F401
 from app.models.database import Base, engine
+from app.models.token_usage import TokenUsage  # noqa: F401
 from app.models.user import User  # noqa: F401 — pastikan model terdaftar
 
 # Buat tabel otomatis saat startup (untuk tabel baru seperti users_jwt)

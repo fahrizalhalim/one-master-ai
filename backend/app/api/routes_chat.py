@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import get_current_user
 from app.models.conversation import Conversation, Message
 from app.models.database import get_db
+from app.models.token_usage import TokenUsage
 from app.models.user import User
 from app.services.master_agent import master_agent
 
@@ -127,6 +128,17 @@ def chat(
 
     # Simpan jawaban AI
     _save_message(db, conv.id, "assistant", result["answer"], result["skill"])
+
+    # Catat pemakaian token user
+    db.add(
+        TokenUsage(
+            user_id=current_user.id,
+            skill=result["skill"],
+            prompt_tokens=result["prompt_tokens"],
+            completion_tokens=result["completion_tokens"],
+            total_tokens=result["total_tokens"],
+        )
+    )
     db.commit()
 
     return ChatResponse(

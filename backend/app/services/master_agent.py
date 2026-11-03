@@ -23,9 +23,10 @@ def load_skill_instruction(skill: str) -> str:
     return ""
 
 
-def ask_ai(prompt: str) -> str:
+def ask_ai(prompt: str) -> dict:
     """Panggil model AI via endpoint OpenAI-compatible.
 
+    Kembalikan dict {text, prompt_tokens, completion_tokens}.
     Coba endpoint /responses dulu; jika provider tidak mendukung,
     fallback ke /chat/completions yang lebih universal.
     """
@@ -34,13 +35,23 @@ def ask_ai(prompt: str) -> str:
             model=OPENAI_MODEL,
             input=prompt,
         )
-        return response.output_text
+        usage = getattr(response, "usage", None)
+        return {
+            "text": response.output_text,
+            "prompt_tokens": getattr(usage, "input_tokens", 0) or 0,
+            "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
+        }
     except Exception:
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.choices[0].message.content
+        usage = getattr(response, "usage", None)
+        return {
+            "text": response.choices[0].message.content,
+            "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+            "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+        }
 
 
 def master_agent(
@@ -81,6 +92,12 @@ Aturan umum:
 Permintaan pengguna:
 {user_message}"""
 
-    answer = ask_ai(instruction)
+    result = ask_ai(instruction)
 
-    return {"skill": skill, "answer": answer}
+    return {
+        "skill": skill,
+        "answer": result["text"],
+        "prompt_tokens": result["prompt_tokens"],
+        "completion_tokens": result["completion_tokens"],
+        "total_tokens": result["prompt_tokens"] + result["completion_tokens"],
+    }

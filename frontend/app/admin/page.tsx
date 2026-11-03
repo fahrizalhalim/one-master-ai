@@ -22,9 +22,19 @@ type Stats = {
   active_users: number;
   total_conversations: number;
   total_messages: number;
+  total_tokens: number;
 };
 
 type Skill = { name: string; instruction_file: string; chars: number };
+
+type TokenRow = {
+  email: string;
+  full_name: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  requests: number;
+};
 
 export default function AdminPage() {
   const { token, user, loading, logout } = useAuth();
@@ -33,9 +43,10 @@ export default function AdminPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
-  const [tab, setTab] = useState<"users" | "skills">("users");
+  const [tab, setTab] = useState<"users" | "skills" | "tokens">("users");
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [tokenRows, setTokenRows] = useState<TokenRow[]>([]);
 
   const headers = useCallback(
     () => ({ Authorization: `Bearer ${token}` }),
@@ -45,10 +56,11 @@ export default function AdminPage() {
   const load = useCallback(async () => {
     if (!token) return;
     try {
-      const [s, u, k] = await Promise.all([
+      const [s, u, k, tk] = await Promise.all([
         fetch(`${API_URL}/api/v1/admin/stats`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/users`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/skills`, { headers: headers() }),
+        fetch(`${API_URL}/api/v1/admin/tokens`, { headers: headers() }),
       ]);
       if (s.status === 403) {
         router.replace("/");
@@ -57,6 +69,7 @@ export default function AdminPage() {
       if (s.ok) setStats(await s.json());
       if (u.ok) setUsers(await u.json());
       if (k.ok) setSkills(await k.json());
+      if (tk.ok) setTokenRows(await tk.json());
     } catch {
       setError("Gagal memuat data admin.");
     }
@@ -191,19 +204,20 @@ export default function AdminPage() {
       ) : (
         <div className="mx-auto max-w-6xl px-6 py-8">
           {/* Statistik */}
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
             {stats && (
               <>
                 <StatCard icon="👥" label="Total User" value={stats.total_users} />
                 <StatCard icon="✅" label="User Aktif" value={stats.active_users} />
                 <StatCard icon="💬" label="Percakapan" value={stats.total_conversations} />
                 <StatCard icon="✉️" label="Total Pesan" value={stats.total_messages} />
+                <StatCard icon="🎯" label="Total Token" value={stats.total_tokens} />
               </>
             )}
           </div>
 
           {/* Tabs */}
-          <div className="mt-8 grid max-w-xs grid-cols-2 gap-2 rounded-xl bg-gray-900 p-1 text-sm">
+          <div className="mt-8 grid max-w-md grid-cols-3 gap-2 rounded-xl bg-gray-900 p-1 text-sm">
             <button
               onClick={() => setTab("users")}
               className={`rounded-lg py-2 font-medium ${
@@ -211,6 +225,14 @@ export default function AdminPage() {
               }`}
             >
               👥 Pengguna
+            </button>
+            <button
+              onClick={() => setTab("tokens")}
+              className={`rounded-lg py-2 font-medium ${
+                tab === "tokens" ? "bg-blue-600" : "text-gray-400"
+              }`}
+            >
+              🎯 Token
             </button>
             <button
               onClick={() => setTab("skills")}
@@ -293,6 +315,53 @@ export default function AdminPage() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* Tabel token per user */}
+          {tab === "tokens" && (
+            <div className="mt-6 overflow-x-auto rounded-xl border border-gray-800">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-gray-900 text-gray-400">
+                  <tr>
+                    <th className="px-4 py-3">Email</th>
+                    <th className="px-4 py-3">Nama</th>
+                    <th className="px-4 py-3 text-right">Permintaan</th>
+                    <th className="px-4 py-3 text-right">Input</th>
+                    <th className="px-4 py-3 text-right">Output</th>
+                    <th className="px-4 py-3 text-right">Total Token</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tokenRows.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-6 text-center text-gray-500">
+                        Belum ada pemakaian token tercatat
+                      </td>
+                    </tr>
+                  )}
+                  {tokenRows.map((r) => (
+                    <tr key={r.email} className="border-t border-gray-800">
+                      <td className="px-4 py-3">{r.email}</td>
+                      <td className="px-4 py-3">{r.full_name || "—"}</td>
+                      <td className="px-4 py-3 text-right">{r.requests}</td>
+                      <td className="px-4 py-3 text-right text-gray-400">
+                        {r.prompt_tokens.toLocaleString("id-ID")}
+                      </td>
+                      <td className="px-4 py-3 text-right text-gray-400">
+                        {r.completion_tokens.toLocaleString("id-ID")}
+                      </td>
+                      <td className="px-4 py-3 text-right font-semibold text-amber-300">
+                        {r.total_tokens.toLocaleString("id-ID")}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="px-4 py-3 text-xs text-gray-500">
+                * Estimasi biaya ≈ total_token ÷ 1.000.000 × harga per juta token
+                di dashboard Sumopod Anda.
+              </p>
             </div>
           )}
 
