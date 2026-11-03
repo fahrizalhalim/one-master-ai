@@ -1,0 +1,27 @@
+services:
+  backend:
+    build: ./backend
+    env_file: .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      - db
+    restart: unless-stopped
+    volumes:
+      - backend_storage:/app/storage
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: onemaster
+      POSTGRES_USER: onemaster
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-ubah_password_ini}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    restart: unless-stopped
+    # Catatan: port 5432 TIDAK dipublikasikan ke internet.
+
+volumes:
+  postgres_data:
+  backend_storage:

@@ -1,0 +1,21 @@
+# secrets & env
+.env
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# storage hasil dokumen
+backend/storage/*
+!backend/storage/.gitkeep
+
+# node
+node_modules/
+.next/
+
+# os/ide
+.DS_Store
+.idea/
+.vscode/
