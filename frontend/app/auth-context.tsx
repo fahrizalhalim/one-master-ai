@@ -61,8 +61,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         body: new URLSearchParams({ username: email, password }),
       });
       const data = await res.json();
-      if (!res.ok) return data.detail || "Login gagal";
+      if (!res.ok) throw new Error(data.detail || "Login gagal");
       persist(data.access_token, data.user);
+      if (data.user.status === "pending") {
+        return "PENDING: Akun Anda berhasil dibuat dan sedang MENUNGGU PERSETUJUAN admin. Anda akan bisa chat setelah disetujui.";
+      }
       return null;
     },
     [persist]
@@ -90,6 +93,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return data.detail || "Registrasi gagal";
       }
       persist(data.access_token, data.user);
+      if (data.user.status === "pending") {
+        return "PENDING: Pendaftaran Anda berhasil dan sedang MENUNGGU PERSETUJUAN admin. Anda akan bisa chat setelah disetujui.";
+      }
       return null;
     },
     [persist]

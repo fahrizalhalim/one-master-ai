@@ -24,9 +24,9 @@ def setup_function():
     db = SessionLocal()
     try:
         if not db.query(User).filter(User.email == ADMIN).first():
-            db.add(User(email=ADMIN, password_hash=hash_password(PW), role="admin", full_name="Admin"))
+            db.add(User(email=ADMIN, password_hash=hash_password(PW), role="admin", status="active", full_name="Admin"))
         if not db.query(User).filter(User.email == USER).first():
-            db.add(User(email=USER, password_hash=hash_password(PW), role="user", full_name="Biasa"))
+            db.add(User(email=USER, password_hash=hash_password(PW), role="user", status="active", full_name="Biasa"))
         db.commit()
     finally:
         db.close()

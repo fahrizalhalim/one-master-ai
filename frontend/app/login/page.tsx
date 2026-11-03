@@ -32,8 +32,12 @@ export default function LoginPage() {
               profession: profession || "umum",
               organization,
             });
-      if (err) setError(err);
-      else router.replace("/");
+      if (err) {
+        setError(err);
+        // Pesan pending: jangan redirect, tampilkan info menunggu persetujuan
+        return;
+      }
+      router.replace("/");
     } catch {
       setError("Tidak dapat terhubung ke server.");
     } finally {

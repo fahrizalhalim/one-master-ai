@@ -13,6 +13,7 @@ type AdminUser = {
   profession: string;
   organization: string;
   role: string;
+  status: string;
   is_active: boolean;
   created_at: string;
 };
@@ -43,10 +44,11 @@ export default function AdminPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
-  const [tab, setTab] = useState<"users" | "skills" | "tokens">("users");
+  const [tab, setTab] = useState<"users" | "skills" | "tokens" | "pending">("users");
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [tokenRows, setTokenRows] = useState<TokenRow[]>([]);
+  const [pending, setPending] = useState<AdminUser[]>([]);
 
   const headers = useCallback(
     () => ({ Authorization: `Bearer ${token}` }),
@@ -56,11 +58,12 @@ export default function AdminPage() {
   const load = useCallback(async () => {
     if (!token) return;
     try {
-      const [s, u, k, tk] = await Promise.all([
+      const [s, u, k, tk, pd] = await Promise.all([
         fetch(`${API_URL}/api/v1/admin/stats`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/users`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/skills`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/tokens`, { headers: headers() }),
+        fetch(`${API_URL}/api/v1/admin/pending`, { headers: headers() }),
       ]);
       if (s.status === 403) {
         router.replace("/");
@@ -70,6 +73,7 @@ export default function AdminPage() {
       if (u.ok) setUsers(await u.json());
       if (k.ok) setSkills(await k.json());
       if (tk.ok) setTokenRows(await tk.json());
+      if (pd.ok) setPending(await pd.json());
     } catch {
       setError("Gagal memuat data admin.");
     }
@@ -159,6 +163,29 @@ export default function AdminPage() {
     flash(`Password ${u.email} direset.`);
   }
 
+  async function decide(u: AdminUser, decision: "approve" | "reject") {
+    const res = await fetch(`${API_URL}/api/v1/admin/users/${u.id}/decision`, {
+      method: "POST",
+      headers: { ...headers(), "Content-Type": "application/json" },
+      body: JSON.stringify({ decision }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setError(data.detail || "Gagal");
+      return;
+    }
+    setPending((list) => list.filter((x) => x.id !== u.id));
+    setUsers((list) =>
+      list.map((x) => (x.id === u.id ? { ...x, status: data.status } : x))
+    );
+    flash(
+      decision === "approve"
+        ? `✅ ${u.email} DISETUJUI — bisa login & chat.`
+        : `⛔ ${u.email} DITOLAK.`
+    );
+    load();
+  }
+
   if (loading || !token || !user) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-gray-950 text-gray-400">
@@ -217,7 +244,7 @@ export default function AdminPage() {
           </div>
 
           {/* Tabs */}
-          <div className="mt-8 grid max-w-md grid-cols-3 gap-2 rounded-xl bg-gray-900 p-1 text-sm">
+          <div className="mt-8 grid max-w-2xl grid-cols-4 gap-2 rounded-xl bg-gray-900 p-1 text-sm">
             <button
               onClick={() => setTab("users")}
               className={`rounded-lg py-2 font-medium ${
@@ -225,6 +252,19 @@ export default function AdminPage() {
               }`}
             >
               👥 Pengguna
+            </button>
+            <button
+              onClick={() => setTab("pending")}
+              className={`rounded-lg py-2 font-medium relative ${
+                tab === "pending" ? "bg-blue-600" : "text-gray-400"
+              }`}
+            >
+              ⏳ Persetujuan
+              {pending.length > 0 && (
+                <span className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-xs text-white">
+                  {pending.length}
+                </span>
+              )}
             </button>
             <button
               onClick={() => setTab("tokens")}
@@ -253,6 +293,52 @@ export default function AdminPage() {
             <p className="mt-4 rounded-lg bg-emerald-900/40 px-3 py-2 text-sm text-emerald-300">
               {toast}
             </p>
+          )}
+
+          {/* Tab persetujuan pendaftaran */}
+          {tab === "pending" && (
+            <div className="mt-6 space-y-3">
+              {pending.length === 0 ? (
+                <div className="rounded-xl border border-gray-800 bg-gray-900 p-8 text-center text-gray-500">
+                  ✅ Tidak ada pendaftar yang menunggu persetujuan
+                </div>
+              ) : (
+                pending.map((u) => (
+                  <div
+                    key={u.id}
+                    className="flex flex-col gap-3 rounded-xl border border-amber-700/40 bg-gray-900 p-4 md:flex-row md:items-center md:justify-between"
+                  >
+                    <div>
+                      <p className="font-semibold">
+                        {u.full_name || "—"}{" "}
+                        <span className="text-sm font-normal text-gray-400">
+                          ({u.email})
+                        </span>
+                      </p>
+                      <p className="mt-0.5 text-xs text-gray-400">
+                        {u.profession || "umum"}
+                        {u.organization ? ` · ${u.organization}` : ""} ·{" "}
+                        mendaftar {new Date(u.created_at).toLocaleDateString("id-ID")}
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => decide(u, "approve")}
+                        className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500"
+                      >
+                        ✅ Setujui
+                      </button>
+                      <button
+                        onClick={() => decide(u, "reject")}
+                        className="rounded-lg border border-red-700/50 px-4 py-2 text-sm font-semibold text-red-300 hover:bg-red-900/40"
+                      >
+                        ⛔ Tolak
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           )}
 
           {/* Tabel user */}
@@ -289,12 +375,18 @@ export default function AdminPage() {
                       <td className="px-4 py-3">
                         <span
                           className={`rounded-full px-2 py-0.5 text-xs ${
-                            u.is_active
+                            u.status === "active"
                               ? "bg-emerald-600/30 text-emerald-300"
-                              : "bg-red-600/30 text-red-300"
+                              : u.status === "pending"
+                                ? "bg-amber-600/30 text-amber-300"
+                                : "bg-red-600/30 text-red-300"
                           }`}
                         >
-                          {u.is_active ? "aktif" : "nonaktif"}
+                          {u.status === "active"
+                            ? "aktif"
+                            : u.status === "pending"
+                              ? "⏳ menunggu"
+                              : "ditolak"}
                         </span>
                       </td>
                       <td className="px-4 py-3">

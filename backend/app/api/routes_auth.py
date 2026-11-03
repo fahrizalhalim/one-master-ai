@@ -39,6 +39,7 @@ class UserInfo(BaseModel):
     profession: str
     organization: str
     role: str = "user"
+    status: str = "pending"
 
     class Config:
         from_attributes = True
@@ -73,11 +74,14 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
         full_name=data.full_name,
         profession=data.profession,
         organization=data.organization,
+        status="pending",  # menunggu persetujuan admin
     )
     db.add(user)
     db.commit()
     db.refresh(user)
 
+    # Token tetap diterbitkan agar user bisa cek status via /auth/me,
+    # TAPI chat diblokir selama status != active.
     token = create_access_token({"sub": user.id})
     return TokenResponse(access_token=token, user=UserInfo.model_validate(user))
 
@@ -92,6 +96,19 @@ def login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email atau password salah.",
             headers={"WWW-Authenticate": "Bearer"},
+        )
+    if user.status == "pending":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Akun Anda masih MENUNGGU PERSETUJUAN admin. "
+                "Silakan coba lagi nanti setelah disetujui."
+            ),
+        )
+    if user.status == "rejected":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Pendaftaran Anda DITOLAK admin. Hubungi admin untuk info lebih lanjut.",
         )
     if not user.is_active:
         raise HTTPException(

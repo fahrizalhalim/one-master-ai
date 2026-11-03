@@ -71,6 +71,16 @@ def test_login_success_and_wrong_password():
         "/api/v1/auth/register",
         json={"email": "login@test.ac.id", "password": "password88"},
     )
+    # approve user (fitur approval: pending tak bisa login)
+    from app.models.database import SessionLocal
+    from app.models.user import User as U
+
+    db = SessionLocal()
+    try:
+        db.query(U).filter(U.email == "login@test.ac.id").update({"status": "active"})
+        db.commit()
+    finally:
+        db.close()
     # benar
     r = client.post(
         "/api/v1/auth/login",

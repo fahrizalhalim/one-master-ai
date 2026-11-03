@@ -37,6 +37,7 @@ class AdminUserItem(BaseModel):
     profession: str
     organization: str
     role: str
+    status: str
     is_active: bool
     created_at: str
 
@@ -169,12 +170,81 @@ def list_users(
             profession=u.profession,
             organization=u.organization,
             role=u.role,
+            status=u.status,
             is_active=u.is_active,
             created_at=u.created_at.isoformat(),
         )
         for u in users
     ]
 
+
+# ---------- Persetujuan pendaftaran (approval) ----------
+
+
+class DecisionRequest(BaseModel):
+    decision: str  # "approve" | "reject"
+
+
+@router.get("/pending")
+def list_pending(
+    admin: User = Depends(require_admin), db: Session = Depends(get_db)
+):
+    """Daftar pendaftar yang menunggu persetujuan."""
+    users = (
+        db.query(User)
+        .filter(User.status == "pending")
+        .order_by(User.created_at.asc())
+        .all()
+    )
+    return [
+        AdminUserItem(
+            id=u.id,
+            email=u.email,
+            full_name=u.full_name,
+            profession=u.profession,
+            organization=u.organization,
+            role=u.role,
+            status=u.status,
+            is_active=u.is_active,
+            created_at=u.created_at.isoformat(),
+        )
+        for u in users
+    ]
+
+
+@router.post("/users/{user_id}/decision", response_model=AdminUserItem)
+def decide_user(
+    user_id: str,
+    data: DecisionRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    if data.decision not in ("approve", "reject"):
+        raise HTTPException(
+            status_code=422, detail="decision harus 'approve' atau 'reject'."
+        )
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User tidak ditemukan.")
+    if target.id == admin.id:
+        raise HTTPException(status_code=400, detail="Tidak perlu approve diri sendiri.")
+
+    target.status = "active" if data.decision == "approve" else "rejected"
+    # Approval sekaligus pastikan akun aktif; rejection nonaktifkan
+    target.is_active = data.decision == "approve"
+    db.commit()
+    db.refresh(target)
+    return AdminUserItem(
+        id=target.id,
+        email=target.email,
+        full_name=target.full_name,
+        profession=target.profession,
+        organization=target.organization,
+        role=target.role,
+        status=target.status,
+        is_active=target.is_active,
+        created_at=target.created_at.isoformat(),
+    )
 
 @router.patch("/users/{user_id}/role", response_model=AdminUserItem)
 def set_role(
@@ -202,6 +272,7 @@ def set_role(
         profession=target.profession,
         organization=target.organization,
         role=target.role,
+        status=target.status,
         is_active=target.is_active,
         created_at=target.created_at.isoformat(),
     )
@@ -229,6 +300,7 @@ def set_active(
         profession=target.profession,
         organization=target.organization,
         role=target.role,
+        status=target.status,
         is_active=target.is_active,
         created_at=target.created_at.isoformat(),
     )

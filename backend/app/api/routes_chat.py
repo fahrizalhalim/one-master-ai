@@ -100,6 +100,14 @@ def chat(
     db: Session = Depends(get_db),
 ):
     # Rate limiting: batas chat per hari (kecuali admin)
+    if current_user.status != "active":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Akun Anda belum disetujui admin. "
+                "Status: menunggu persetujuan."
+            ),
+        )
     limit, used = daily_quota(db, current_user)
     if limit > 0 and used >= limit:
         raise HTTPException(

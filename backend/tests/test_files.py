@@ -9,7 +9,8 @@ from docx import Document  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
-from app.models.database import Base, engine  # noqa: E402
+from app.models.database import Base, engine, SessionLocal
+from app.models.user import User  # noqa: E402
 
 client = TestClient(app)
 
@@ -19,6 +20,18 @@ PASSWORD = "password123"
 
 def setup_function():
     Base.metadata.create_all(bind=engine)
+
+
+def _approve_all():
+    """Setujui semua user pending langsung via DB (test helper)."""
+    db = SessionLocal()
+    try:
+        db.query(User).filter(User.status == "pending").update(
+            {"status": "active"}, synchronize_session=False
+        )
+        db.commit()
+    finally:
+        db.close()
 
 
 def _token() -> str:
@@ -31,6 +44,7 @@ def _token() -> str:
             "/api/v1/auth/login",
             data={"username": EMAIL, "password": PASSWORD},
         )
+    _approve_all()
     return r.json()["access_token"]
 
 
