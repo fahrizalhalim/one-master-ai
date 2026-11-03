@@ -31,6 +31,10 @@ DATABASE_URL = _get(
     "DATABASE_URL",
     "postgresql+psycopg://onemaster:onemaster@db:5432/onemaster",
 )
+JWT_SECRET_KEY = _get(
+    "JWT_SECRET_KEY",
+    "ubah-ini-di-env-produksi-58f8b3c1",
+)
 
 APP_NAME = "ONE MASTER AI"
 APP_VERSION = "0.1.0"

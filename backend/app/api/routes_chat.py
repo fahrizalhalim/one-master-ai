@@ -1,6 +1,8 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from app.api.dependencies import get_current_user
+from app.models.user import User
 from app.services.master_agent import master_agent
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
@@ -8,8 +10,6 @@ router = APIRouter(prefix="/api/v1", tags=["chat"])
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
-    profession: str = Field(default="umum", max_length=100)
-    user_id: str = Field(default="anonymous", max_length=64)
 
 
 class ChatResponse(BaseModel):
@@ -18,6 +18,12 @@ class ChatResponse(BaseModel):
 
 
 @router.post("/chat", response_model=ChatResponse)
-def chat(data: ChatRequest):
-    result = master_agent(user_message=data.message, profession=data.profession)
+def chat(
+    data: ChatRequest,
+    current_user: User = Depends(get_current_user),
+):
+    # Profesi diambil dari profil user yang login (bukan dari client)
+    result = master_agent(
+        user_message=data.message, profession=current_user.profession
+    )
     return ChatResponse(skill=result["skill"], answer=result["answer"])
