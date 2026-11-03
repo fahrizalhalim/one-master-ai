@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/app/auth-context";
+import DownloadButtons from "@/app/download-buttons";
 import { useConversations } from "@/app/use-conversations";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
@@ -222,6 +223,13 @@ export default function Home() {
                   </span>
                 )}
                 <p>{m.content}</p>
+                {m.role === "assistant" && !m.content.startsWith("⚠️") && (
+                  <DownloadButtons
+                    token={token}
+                    title={messages[0]?.role === "user" ? messages[0].content.slice(0, 60) : "Dokumen ONE MASTER AI"}
+                    content={m.content}
+                  />
+                )}
               </div>
             </div>
           ))}

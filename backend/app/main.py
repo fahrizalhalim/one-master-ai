@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes_auth import router as auth_router
 from app.api.routes_chat import router as chat_router
 from app.api.routes_conversations import router as conversations_router
+from app.api.routes_documents import router as documents_router
 from app.core.config import APP_NAME, APP_VERSION
 from app.models.conversation import Conversation, Message  # noqa: F401
 from app.models.database import Base, engine
@@ -33,6 +34,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(conversations_router)
+app.include_router(documents_router)
 
 
 @app.get("/")
