@@ -41,7 +41,7 @@ def test_route_general():
 
 
 def test_load_skill_instruction():
-    assert "OBE" in load_skill_instruction("academic")
+    assert "OBE" in load_skill_instruction("academic", "buatkan RPS OBE")
 
 
 def test_chat_validation():

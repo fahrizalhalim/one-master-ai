@@ -9,6 +9,10 @@ SKILLS = {
         "rps", "obe", "skripsi", "makalah", "jurnal", "perkuliahan",
         "penelitian", "kuliah", "mahasiswa", "kurikulum", "cpl", "cpmk",
         "dosen", "kampus", "universitas", "asesmen", "ujian", "tugas akhir",
+        "tutor", "belajar", "flashcard", "latihan soal", "soal", "koreksi",
+        "sitasi", "daftar pustaka", "apa style", "ieee", "referensi", "footnote",
+        "praktikum", "laporan praktikum", "alat dan bahan", "dasar teori",
+        "modul", "percobaan", "kesimpulan",
     ],
     "government": [
         "desa", "anggaran", "bupati", "dinas", "program", "kuota",

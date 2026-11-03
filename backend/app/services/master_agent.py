@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 from openai import OpenAI
 
@@ -13,14 +14,32 @@ client = OpenAI(
 )
 
 
-def load_skill_instruction(skill: str) -> str:
-    """Muat instruksi skill dari file markdown pertama di folder skill-nya."""
+def load_skill_instruction(skill: str, user_message: str = "") -> str:
+    """Muat instruksi skill dari folder skill-nya.
+
+    Jika folder punya beberapa file .md (sub-skill), pilih file yang
+    paling cocok dengan kata kunci pada pesan user. Tanpa kecocokan,
+    gunakan file pertama sebagai default.
+    """
     skill_dir = SKILLS_DIR / skill
     if not skill_dir.is_dir():
         return ""
-    for md_file in sorted(skill_dir.glob("*.md")):
-        return md_file.read_text(encoding="utf-8")
-    return ""
+
+    md_files = sorted(skill_dir.glob("*.md"))
+    if not md_files:
+        return ""
+
+    if len(md_files) == 1 or not user_message:
+        return md_files[0].read_text(encoding="utf-8")
+
+    # Sub-skill: skor kecocokan kata kunci nama file dengan pesan user
+    text = user_message.lower()
+    def score(f: Path) -> int:
+        keywords = re.split(r"[_\-]", f.stem)
+        return sum(1 for kw in keywords if len(kw) > 2 and kw in text)
+
+    best = max(md_files, key=score)
+    return best.read_text(encoding="utf-8")
 
 
 def ask_ai(prompt: str) -> dict:
@@ -61,7 +80,7 @@ def master_agent(
     file_text: str = "",
 ) -> dict:
     skill = route_skill(user_message)
-    skill_instruction = load_skill_instruction(skill)
+    skill_instruction = load_skill_instruction(skill, user_message)
 
     skill_block = ""
     if skill_instruction:
