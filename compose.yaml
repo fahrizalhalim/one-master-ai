@@ -10,6 +10,14 @@ services:
     volumes:
       - backend_storage:/app/storage
 
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
   db:
     image: postgres:17
     environment:

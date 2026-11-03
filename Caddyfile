@@ -1,0 +1,33 @@
+# Konfigurasi Caddy untuk ONE MASTER AI
+# Salin isi file ini ke /etc/caddy/Caddyfile di VPS, lalu: sudo systemctl reload caddy
+
+gamalama-mht.my.id {
+    # API backend -> FastAPI (port 8000)
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8000
+    }
+
+    # Dokumentasi API (opsional, bisa dihapus di produksi)
+    handle /docs {
+        reverse_proxy 127.0.0.1:8000
+    }
+    handle /openapi.json {
+        reverse_proxy 127.0.0.1:8000
+    }
+
+    # Sisanya -> frontend Next.js (port 3000)
+    handle {
+        reverse_proxy 127.0.0.1:3000
+    }
+
+    # Kompresi otomatis
+    encode gzip
+
+    # Header keamanan dasar
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+}

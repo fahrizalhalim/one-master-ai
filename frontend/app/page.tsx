@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
+// Kosong = pakai domain yang sama (relatif), dilayani lewat reverse proxy Caddy.
+// Untuk dev lokal isi NEXT_PUBLIC_API_URL=http://127.0.0.1:8000 di .env.local
 
 type Message = { role: "user" | "assistant"; content: string; skill?: string };
 
