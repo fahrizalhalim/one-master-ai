@@ -1,32 +1,42 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useAuth } from "@/app/auth-context";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
-// Kosong = pakai domain yang sama (relatif), dilayani lewat reverse proxy Caddy.
-// Untuk dev lokal isi NEXT_PUBLIC_API_URL=http://127.0.0.1:8000 di .env.local
 
 type Message = { role: "user" | "assistant"; content: string; skill?: string };
 
 export default function Home() {
+  const { token, user, loading, logout } = useAuth();
+  const router = useRouter();
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [profession, setProfession] = useState("Dosen Teknik Informatika");
-  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  // Guard: belum login -> ke /login
+  useEffect(() => {
+    if (!loading && !token) router.replace("/login");
+  }, [loading, token, router]);
 
   async function send() {
     const text = input.trim();
-    if (!text || loading) return;
+    if (!text || busy || !token) return;
 
     setMessages((m) => [...m, { role: "user", content: text }]);
     setInput("");
-    setLoading(true);
+    setBusy(true);
 
     try {
       const res = await fetch(`${API_URL}/api/v1/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, profession }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ message: text }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Gagal memproses");
@@ -39,12 +49,20 @@ export default function Home() {
         ...m,
         {
           role: "assistant",
-          content: `⚠️ Terjadi kesalahan: ${err instanceof Error ? err.message : "tidak diketahui"}. Pastikan backend berjalan di ${API_URL}.`,
+          content: `⚠️ Terjadi kesalahan: ${err instanceof Error ? err.message : "tidak diketahui"}.`,
         },
       ]);
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
+  }
+
+  if (loading || !token || !user) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-gray-950 text-gray-400">
+        Memuat…
+      </main>
+    );
   }
 
   return (
@@ -52,21 +70,17 @@ export default function Home() {
       {/* Header */}
       <header className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
         <div>
-          <h1 className="text-xl font-bold tracking-tight">
-            🤖 ONE MASTER AI
-          </h1>
+          <h1 className="text-xl font-bold tracking-tight">🤖 ONE MASTER AI</h1>
           <p className="text-xs text-gray-400">
-            Asisten pekerjaan akademik, bisnis, teknologi & riset
+            {user.full_name || user.email} · {user.profession}
           </p>
         </div>
-        <label className="flex items-center gap-2 text-sm">
-          <span className="text-gray-400">Profesi:</span>
-          <input
-            value={profession}
-            onChange={(e) => setProfession(e.target.value)}
-            className="w-56 rounded-md border border-gray-700 bg-gray-900 px-3 py-1.5 outline-none focus:border-blue-500"
-          />
-        </label>
+        <button
+          onClick={logout}
+          className="rounded-lg border border-gray-700 px-4 py-1.5 text-sm text-gray-300 hover:bg-gray-800"
+        >
+          Keluar
+        </button>
       </header>
 
       {/* Chat area */}
@@ -75,8 +89,9 @@ export default function Home() {
           <div className="mx-auto mt-24 max-w-md text-center text-gray-500">
             <p className="text-4xl">💬</p>
             <p className="mt-3">
-              Mulai percakapan. Contoh: &quot;Buatkan RPS mata kuliah Algoritma
-              dengan pendekatan OBE&quot;
+              Selamat datang, {user.full_name || user.email}! Tulis permintaan
+              Anda — contoh: &quot;Buatkan RPS mata kuliah Algoritma dengan
+              pendekatan OBE&quot;
             </p>
           </div>
         )}
@@ -101,7 +116,7 @@ export default function Home() {
             </div>
           </div>
         ))}
-        {loading && (
+        {busy && (
           <div className="flex justify-start">
             <div className="rounded-2xl bg-gray-800 px-4 py-3 text-sm text-gray-400">
               Master AI sedang berpikir…
@@ -119,11 +134,11 @@ export default function Home() {
             onKeyDown={(e) => e.key === "Enter" && send()}
             placeholder="Tulis permintaan Anda…"
             className="flex-1 rounded-xl border border-gray-700 bg-gray-900 px-4 py-3 outline-none focus:border-blue-500"
-            disabled={loading}
+            disabled={busy}
           />
           <button
             onClick={send}
-            disabled={loading || !input.trim()}
+            disabled={busy || !input.trim()}
             className="rounded-xl bg-blue-600 px-6 py-3 font-medium hover:bg-blue-500 disabled:opacity-40"
           >
             Kirim
