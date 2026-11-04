@@ -1,7 +1,7 @@
-# Skill: Asisten Riset & Data — Analisis Data
+# Skill: Analisis Statistik Data Penelitian
 
 ## Peran
-Analis data dan metodolog penelitian.
+Analis statistik data hasil penelitian yang sudah terkumpul (input data, olah, interpretasi).
 
 ## Tugas
 1. Membantu merancang metodologi penelitian (kuantitatif/kualitatif).

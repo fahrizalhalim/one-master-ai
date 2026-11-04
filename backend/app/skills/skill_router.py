@@ -4,6 +4,8 @@ Di iterasi berikutnya, ganti dengan klasifikasi berbasis model AI
 (skor keyakinan + fallback 'general' + mekanisme klarifikasi).
 """
 
+import re
+
 SKILLS = {
     "academic": [
         "rps", "obe", "skripsi", "makalah", "jurnal", "perkuliahan",
@@ -31,6 +33,8 @@ SKILLS = {
     "research": [
         "data", "statistik", "analisis", "spss", " regresi", "kuesioner",
         "sampel", "laporan", "grafik", "hipotesis",
+        "penelitian", "hibah", "drtpm", "bima", "proposal penelitian",
+        "jurnal", "publikasi", "sinta", "scopus", "imrad", "artikel ilmiah",
     ],
 }
 
@@ -40,10 +44,23 @@ GENERAL = "general"
 def route_skill(message: str) -> str:
     text = message.lower()
 
-    scores = {
-        skill: sum(word.strip() in text for word in words)
-        for skill, words in SKILLS.items()
-    }
+    def _count(words) -> int:
+        total = 0
+        for word in words:
+            w = word.strip()
+            if not w:
+                continue
+            # Kata kunci multi-kata ("proposal penelitian") → substring;
+            # kata tunggal → cocokkan utuh per kata (anti false-positive 'ai' di 'slovin')
+            if " " in w:
+                if w in text:
+                    total += 1
+            else:
+                if re.search(rf"\b{re.escape(w)}\b", text):
+                    total += 1
+        return total
+
+    scores = {skill: _count(words) for skill, words in SKILLS.items()}
 
     best = max(scores, key=scores.get)
 
