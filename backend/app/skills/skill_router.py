@@ -20,6 +20,10 @@ SKILLS = {
         "desa", "anggaran", "bupati", "dinas", "program", "kuota",
         "pemerintah", "kecamatan", "kelurahan", "perdes", "skpd", "rpjmd",
         "notulen", "rapat", "dekan", "kaprodi", "fakultas", "renstra",
+        "jadwal", "surat keputusan", "sk pembimbing", "surat dinas",
+        "surat tugas", "undangan", "pengumuman ujian", "draft sk",
+        "surat", "pengumuman", "seminar", "ujian proposal", "ujian skripsi",
+        "penempatan ruang", "pengawas",
         "swot", "kpi", "strategi", "perencanaan strategis", "eksekutif",
     ],
     "business": [
