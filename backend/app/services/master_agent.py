@@ -32,11 +32,14 @@ def load_skill_instruction(skill: str, user_message: str = "") -> str:
     if len(md_files) == 1 or not user_message:
         return md_files[0].read_text(encoding="utf-8")
 
-    # Sub-skill: skor kecocokan kata kunci nama file dengan pesan user
+    # Sub-skill: skor kecocokan kata kunci (nama file + judul dalam file)
     text = user_message.lower()
     def score(f: Path) -> int:
-        keywords = re.split(r"[_\-]", f.stem)
-        return sum(1 for kw in keywords if len(kw) > 2 and kw in text)
+        keywords = set(re.split(r"[_\-]", f.stem))
+        content_head = f.read_text(encoding="utf-8", errors="ignore")[:400].lower()
+        content_words = re.findall(r"[a-z]{3,}", content_head)
+        keywords.update(content_words)
+        return sum(1 for kw in keywords if len(kw) >= 3 and kw in text)
 
     best = max(md_files, key=score)
     return best.read_text(encoding="utf-8")

@@ -17,6 +17,8 @@ SKILLS = {
     "government": [
         "desa", "anggaran", "bupati", "dinas", "program", "kuota",
         "pemerintah", "kecamatan", "kelurahan", "perdes", "skpd", "rpjmd",
+        "notulen", "rapat", "dekan", "kaprodi", "fakultas", "renstra",
+        "swot", "kpi", "strategi", "perencanaan strategis", "eksekutif",
     ],
     "business": [
         "usaha", "bisnis", "pemasaran", "keuangan", "umkm", "modal",
