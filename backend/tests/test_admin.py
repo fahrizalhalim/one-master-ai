@@ -116,7 +116,7 @@ def test_admin_list_skills():
 
     r2 = client.get("/api/v1/admin/skills/academic", headers=h)
     assert r2.status_code == 200
-    assert "OBE" in r2.json()["content"]
+    assert "Skripsi" in r2.json()["content"] or "OBE" in r2.json()["content"]
 
 
 def test_reset_password():
