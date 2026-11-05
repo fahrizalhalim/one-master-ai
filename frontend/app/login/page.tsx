@@ -48,8 +48,13 @@ export default function LoginPage() {
   return (
     <main className="flex min-h-screen items-center justify-center bg-gray-950 px-4 text-gray-100">
       <div className="w-full max-w-md rounded-2xl border border-gray-800 bg-gray-900 p-8 shadow-xl">
+        <img
+          src="/logo-gamalama.jpg"
+          alt="Logo ONE MASTER AI"
+          className="mx-auto mb-3 h-28 w-auto rounded-xl"
+        />
         <h1 className="text-center text-2xl font-bold">
-          🤖 ONE MASTER AI
+          ONE MASTER AI
         </h1>
         <p className="mt-1 text-center text-sm text-gray-400">
           {mode === "login" ? "Masuk ke akun Anda" : "Buat akun baru"}

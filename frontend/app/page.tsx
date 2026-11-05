@@ -226,13 +226,19 @@ export default function Home() {
           >
             ☰ Riwayat
           </button>
-          <h1 className="text-lg font-bold">🤖 ONE MASTER AI</h1>
+          <h1 className="flex items-center gap-2 text-lg font-bold">
+            <img src="/logo-gamalama.jpg" alt="Logo" className="h-9 w-9 rounded-full object-cover" />
+            ONE MASTER AI
+          </h1>
           <div className="w-16" />
         </header>
         <header className="hidden border-b border-gray-800 px-6 py-4 md:block">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-xl font-bold tracking-tight">🤖 ONE MASTER AI</h1>
+              <h1 className="flex items-center gap-3 text-xl font-bold tracking-tight">
+                <img src="/logo-gamalama.jpg" alt="Logo" className="h-11 w-11 rounded-full object-cover" />
+                ONE MASTER AI
+              </h1>
               <p className="text-xs text-gray-400">
                 {user.full_name || user.email} · {user.profession}
               </p>
