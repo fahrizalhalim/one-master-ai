@@ -18,6 +18,8 @@ SKILLS = {
         "sitasi", "daftar pustaka", "apa style", "ieee", "referensi", "footnote",
         "praktikum", "laporan praktikum", "alat dan bahan", "dasar teori",
         "modul", "percobaan", "kesimpulan",
+        "review", "reviewer", "novelty", "gap", "catatan perbaikan",
+        "validitas", "pemeriksaan naskah", "periksa proposal", "periksa skripsi",
     ],
     "government": [
         "desa", "anggaran", "bupati", "dinas", "program", "kuota",
