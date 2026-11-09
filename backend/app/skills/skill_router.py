@@ -20,6 +20,8 @@ SKILLS = {
         "modul", "percobaan", "kesimpulan",
         "review", "reviewer", "novelty", "gap", "catatan perbaikan",
         "validitas", "pemeriksaan naskah", "periksa proposal", "periksa skripsi",
+        "turnitin", "plagiarisme", "similarity", "deteksi ai", "cek ai",
+        "pra-integritas", "duplikasi", "indeks kesamaan",
     ],
     "government": [
         "desa", "anggaran", "bupati", "dinas", "program", "kuota",
