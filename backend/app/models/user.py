@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Optional
 
 from sqlalchemy import DateTime, String, func
 from sqlalchemy.orm import Mapped, mapped_column
@@ -24,4 +25,8 @@ class User(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
+    )
+
+    api_key: Mapped[Optional[str]] = mapped_column(
+        String(128), unique=True, index=True, nullable=True
     )

@@ -27,6 +27,8 @@ _env = load_env()
 OPENAI_API_KEY = _get("OPENAI_API_KEY")
 OPENAI_BASE_URL = _get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_MODEL = _get("OPENAI_MODEL", "gpt-4o-mini")
+GROQ_API_KEY = _get("GROQ_API_KEY")
+GROQ_BASE_URL = _get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 DATABASE_URL = _get(
     "DATABASE_URL",
     "postgresql+psycopg://onemaster:onemaster@db:5432/onemaster",
@@ -35,11 +37,18 @@ JWT_SECRET_KEY = _get(
     "JWT_SECRET_KEY",
     "ubah-ini-di-env-produksi-58f8b3c1",
 )
-# Batas chat per user per hari (rate limiting biaya AI). 0 = tanpa batas.
-DAILY_CHAT_LIMIT = int(_get("DAILY_CHAT_LIMIT", "50"))
 # Dokumentasi API publik (/docs, /openapi.json). Default tertutup di produksi.
 # Set "true" hanya saat development lokal.
 API_DOCS_PUBLIC = _get("API_DOCS_PUBLIC", "false").lower() in ("1", "true", "yes")
 
 APP_NAME = "ONE MASTER AI"
 APP_VERSION = "0.1.0"
+
+# Kunci khusus enkripsi Bot Token Telegram.
+TELEGRAM_ENCRYPTION_KEY = _get("TELEGRAM_ENCRYPTION_KEY")
+
+# URL publik backend untuk menerima webhook Telegram.
+TELEGRAM_WEBHOOK_BASE_URL = _get(
+    "TELEGRAM_WEBHOOK_BASE_URL",
+    "https://gamalama-mht.my.id",
+).rstrip("/")

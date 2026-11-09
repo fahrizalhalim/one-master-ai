@@ -1,38 +1,56 @@
-"""Tes: /docs & /openapi.json tertutup secara default di produksi."""
-import importlib
+"""Tes keamanan dokumentasi API dalam proses Python terisolasi."""
+
 import os
+import subprocess
 import sys
+import textwrap
 
 
-def _build_app(docs_public: str):
-    """Buat app segar dengan env API_DOCS_PUBLIC tertentu."""
-    for mod in list(sys.modules):
-        if mod.startswith("app."):
-            del sys.modules[mod]
-    os.environ["OPENAI_API_KEY"] = "test-key-dummy"
-    os.environ["DATABASE_URL"] = "sqlite:///./test_docs.db"
-    os.environ["API_DOCS_PUBLIC"] = docs_public
+def _check_docs(docs_public: str):
+    script = textwrap.dedent(
+        """
+        import os
+        from fastapi.testclient import TestClient
+        from app.main import app
 
-    import app.main as main_mod
+        client = TestClient(app)
+        expected = os.environ["API_DOCS_PUBLIC"].lower() == "true"
 
-    importlib.reload(main_mod)
-    return main_mod.app
+        if expected:
+            assert client.get("/docs").status_code == 200
+            assert client.get("/openapi.json").status_code == 200
+            assert client.get("/redoc").status_code == 200
+        else:
+            assert client.get("/docs").status_code == 404
+            assert client.get("/openapi.json").status_code == 404
+            assert client.get("/redoc").status_code == 404
+
+        assert client.get("/health").status_code == 200
+        """
+    )
+
+    env = os.environ.copy()
+    env["API_DOCS_PUBLIC"] = docs_public
+    env["OPENAI_API_KEY"] = "test-key-dummy"
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, (
+        f"Subprocess gagal untuk API_DOCS_PUBLIC={docs_public}\\n"
+        f"STDOUT:\\n{result.stdout}\\n"
+        f"STDERR:\\n{result.stderr}"
+    )
 
 
 def test_docs_closed_by_default():
-    app = _build_app("false")
-    c = TestClientCls = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient
-    client = c(app)
-    assert client.get("/docs").status_code == 404
-    assert client.get("/openapi.json").status_code == 404
-    assert client.get("/redoc").status_code == 404
-    # endpoint inti tetap jalan
-    assert client.get("/health").status_code == 200
+    _check_docs("false")
 
 
 def test_docs_open_when_enabled():
-    app = _build_app("true")
-    c = TestClientCls = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient
-    client = c(app)
-    assert client.get("/docs").status_code == 200
-    assert client.get("/openapi.json").status_code == 200
+    _check_docs("true")

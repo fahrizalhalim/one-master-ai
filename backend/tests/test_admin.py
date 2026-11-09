@@ -66,7 +66,7 @@ def test_admin_toggle_active_and_role():
     # nonaktifkan
     r = client.patch(
         f"/api/v1/admin/users/{target['id']}/active",
-        json={"is_active": False}, headers=ha,
+        json={"is_active": False, "admin_password": PW}, headers=ha,
     )
     assert r.status_code == 200 and r.json()["is_active"] is False
 
@@ -77,19 +77,19 @@ def test_admin_toggle_active_and_role():
     # aktifkan lagi
     r3 = client.patch(
         f"/api/v1/admin/users/{target['id']}/active",
-        json={"is_active": True}, headers=ha,
+        json={"is_active": True, "admin_password": PW}, headers=ha,
     )
     assert r3.json()["is_active"] is True
 
     # angkat jadi admin lalu turunkan lagi
     r4 = client.patch(
         f"/api/v1/admin/users/{target['id']}/role",
-        json={"role": "admin"}, headers=ha,
+        json={"role": "admin", "admin_password": PW}, headers=ha,
     )
     assert r4.json()["role"] == "admin"
     r5 = client.patch(
         f"/api/v1/admin/users/{target['id']}/role",
-        json={"role": "user"}, headers=ha,
+        json={"role": "user", "admin_password": PW}, headers=ha,
     )
     assert r5.json()["role"] == "user"
 
@@ -101,7 +101,7 @@ def test_admin_cannot_deactivate_self():
     me = next(u for u in users if u["email"] == ADMIN)
     r = client.patch(
         f"/api/v1/admin/users/{me['id']}/active",
-        json={"is_active": False}, headers=ha,
+        json={"is_active": False, "admin_password": PW}, headers=ha,
     )
     assert r.status_code == 400
 
@@ -127,7 +127,7 @@ def test_reset_password():
 
     r = client.post(
         f"/api/v1/admin/users/{target['id']}/reset-password",
-        json={"new_password": "passwordRahasiaBaru9"}, headers=ha,
+        json={"new_password": "passwordRahasiaBaru9", "admin_password": PW}, headers=ha,
     )
     assert r.status_code == 200
 

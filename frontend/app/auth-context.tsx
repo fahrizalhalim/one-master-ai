@@ -11,6 +11,12 @@ export type User = {
   profession: string;
   organization: string;
   role?: string;
+  status?: string;
+  package_code?: string;
+  package_name?: string;
+  package_expires_at?: string | null;
+  package_days_remaining?: number | null;
+  package_is_default?: boolean;
 };
 
 type AuthState = {
@@ -35,15 +41,53 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Pulihkan sesi dari localStorage saat pertama load
+  // Pulihkan sesi lalu sinkronkan profil dan paket terbaru dari backend.
   useEffect(() => {
     const t = localStorage.getItem("oma_token");
     const u = localStorage.getItem("oma_user");
-    if (t && u) {
-      setToken(t);
-      setUser(JSON.parse(u));
+
+    if (!t) {
+      setLoading(false);
+      return;
     }
-    setLoading(false);
+
+    setToken(t);
+
+    if (u) {
+      try {
+        setUser(JSON.parse(u));
+      } catch {
+        localStorage.removeItem("oma_user");
+      }
+    }
+
+    let cancelled = false;
+
+    async function refreshProfile() {
+      try {
+        const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+          headers: { Authorization: `Bearer ${t}` },
+        });
+
+        if (res.ok) {
+          const freshUser = await res.json();
+          if (!cancelled) {
+            setUser(freshUser);
+            localStorage.setItem("oma_user", JSON.stringify(freshUser));
+          }
+        }
+      } catch {
+        // Pertahankan sesi lokal jika backend sementara tidak terjangkau.
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    refreshProfile();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const persist = useCallback((newToken: string, newUser: User) => {

@@ -1,3 +1,5 @@
+import math
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field
@@ -6,6 +8,8 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import get_current_user
 from app.models.database import get_db
 from app.models.user import User
+from app.models.subscription import SubscriptionPlan, UserSubscription
+from app.services.token_service import wit_now
 from app.services.auth_service import (
     create_access_token,
     hash_password,
@@ -40,6 +44,11 @@ class UserInfo(BaseModel):
     organization: str
     role: str = "user"
     status: str = "pending"
+    package_code: str = "starter"
+    package_name: str = "Starter"
+    package_expires_at: str | None = None
+    package_days_remaining: int | None = None
+    package_is_default: bool = True
 
     class Config:
         from_attributes = True
@@ -48,6 +57,55 @@ class UserInfo(BaseModel):
 class MessageResponse(BaseModel):
     message: str
 
+
+
+
+def build_user_info(db: Session, user: User) -> UserInfo:
+    """Profil pengguna beserta paket efektif berdasarkan masa berlaku WIT."""
+    data = UserInfo.model_validate(user).model_dump()
+
+    now = wit_now()
+    active = (
+        db.query(UserSubscription, SubscriptionPlan)
+        .join(
+            SubscriptionPlan,
+            SubscriptionPlan.id == UserSubscription.plan_id,
+        )
+        .filter(
+            UserSubscription.user_id == user.id,
+            UserSubscription.status == "active",
+            UserSubscription.current_period_start <= now,
+            UserSubscription.current_period_end > now,
+            SubscriptionPlan.is_active.is_(True),
+        )
+        .order_by(UserSubscription.current_period_start.desc())
+        .first()
+    )
+
+    if active is None:
+        data.update({
+            "package_code": "starter",
+            "package_name": "Starter",
+            "package_expires_at": None,
+            "package_days_remaining": None,
+            "package_is_default": True,
+        })
+    else:
+        subscription, plan = active
+        seconds_left = (
+            subscription.current_period_end - now
+        ).total_seconds()
+        days_left = max(1, math.ceil(seconds_left / 86400))
+
+        data.update({
+            "package_code": plan.code,
+            "package_name": plan.name,
+            "package_expires_at": subscription.current_period_end.isoformat(),
+            "package_days_remaining": days_left,
+            "package_is_default": False,
+        })
+
+    return UserInfo(**data)
 
 # ---------- Endpoints ----------
 
@@ -83,7 +141,7 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
     # Token tetap diterbitkan agar user bisa cek status via /auth/me,
     # TAPI chat diblokir selama status != active.
     token = create_access_token({"sub": user.id})
-    return TokenResponse(access_token=token, user=UserInfo.model_validate(user))
+    return TokenResponse(access_token=token, user=build_user_info(db, user))
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -117,9 +175,12 @@ def login(
         )
 
     token = create_access_token({"sub": user.id})
-    return TokenResponse(access_token=token, user=UserInfo.model_validate(user))
+    return TokenResponse(access_token=token, user=build_user_info(db, user))
 
 
 @router.get("/me", response_model=UserInfo)
-def me(current_user: User = Depends(get_current_user)):
-    return UserInfo.model_validate(current_user)
+def me(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return build_user_info(db, current_user)

@@ -1,108 +1,144 @@
-"""Tes riwayat percakapan (memory) dengan SQLite in-memory."""
-import os
+"""Tes riwayat percakapan dengan data pengguna unik."""
 
-os.environ.setdefault("OPENAI_API_KEY", "test-key-dummy")
-os.environ.setdefault("DATABASE_URL", "sqlite:///./test_conv.db")
+import uuid
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from app.main import app  # noqa: E402
+from app.main import app
 from app.models.database import Base, engine, SessionLocal
-from app.models.user import User  # noqa: E402
+from app.models.user import User
+from app.models.subscription import TokenWallet
 
 client = TestClient(app)
-
-EMAIL = "mem@test.ac.id"
 PASSWORD = "password123"
 
 
-def setup_function():
-    Base.metadata.create_all(bind=engine)
+def _new_email():
+    return f"conversation-{uuid.uuid4().hex}@test.ac.id"
 
 
-def _approve_all():
-    """Setujui semua user pending langsung via DB (test helper)."""
+def _register(email):
+    response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": email,
+            "password": PASSWORD,
+            "profession": "dosen",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    token = response.json()["access_token"]
+
     db = SessionLocal()
     try:
-        db.query(User).filter(User.status == "pending").update(
-            {"status": "active"}, synchronize_session=False
+        user = db.query(User).filter(User.email == email).one()
+        user.status = "active"
+
+        wallet = (
+            db.query(TokenWallet)
+            .filter(TokenWallet.user_id == user.id)
+            .first()
         )
+        if wallet is None:
+            db.add(TokenWallet(
+                user_id=user.id,
+                topup_balance=100000,
+            ))
+
         db.commit()
     finally:
         db.close()
 
+    return token
 
-def _token() -> str:
-    r = client.post(
-        "/api/v1/auth/register",
-        json={"email": EMAIL, "password": PASSWORD, "profession": "dosen"},
+
+def _auth(token):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _create_chat(token, message):
+    response = client.post(
+        "/api/v1/chat",
+        json={"message": message},
+        headers=_auth(token),
     )
-    if r.status_code != 201:
-        r = client.post(
-            "/api/v1/auth/login",
-            data={"username": EMAIL, "password": PASSWORD},
-        )
-    _approve_all()
-    return r.json()["access_token"]
+    assert response.status_code in (200, 502), response.text
+    return response
 
 
-def _auth(t):
-    return {"Authorization": f"Bearer {t}"}
+def _find_conversation(token, title):
+    response = client.get(
+        "/api/v1/conversations",
+        headers=_auth(token),
+    )
+    assert response.status_code == 200, response.text
+
+    matches = [
+        item for item in response.json()
+        if item["title"].startswith(title)
+    ]
+    assert len(matches) == 1, response.json()
+    return matches[0]
 
 
 def test_chat_creates_conversation_and_history():
-    t = _token()
-    # Chat pertama — buat percakapan baru.
-    # Dengan dummy key, pemanggilan AI gagal -> 502, TAPI percakapan
-    # dan pesan user tetap tersimpan (desain memory anti-hilang).
-    r1 = client.post(
-        "/api/v1/chat", json={"message": "halo"}, headers=_auth(t)
-    )
-    assert r1.status_code in (200, 502)
-    # conversation_id tidak ada di body 502; ambil dari list conversations
-    r_list = client.get("/api/v1/conversations", headers=_auth(t))
-    assert r_list.status_code == 200
-    items = r_list.json()
-    assert len(items) >= 1
-    cid = items[0]["id"]
-    assert items[0]["title"].startswith("halo")
+    Base.metadata.create_all(bind=engine)
 
-    # Detail percakapan: minimal 1 pesan (user)
-    r3 = client.get(f"/api/v1/conversations/{cid}", headers=_auth(t))
-    assert r3.status_code == 200
-    detail = r3.json()
-    assert any(m["role"] == "user" and m["content"] == "halo" for m in detail["messages"])
+    token = _register(_new_email())
+    _create_chat(token, "halo")
+
+    item = _find_conversation(token, "halo")
+    detail = client.get(
+        f"/api/v1/conversations/{item['id']}",
+        headers=_auth(token),
+    )
+
+    assert detail.status_code == 200, detail.text
+    assert any(
+        message["role"] == "user"
+        and message["content"] == "halo"
+        for message in detail.json()["messages"]
+    )
 
 
 def test_conversation_isolation():
-    # user A buat percakapan
-    t = _token()
-    r = client.post("/api/v1/chat", json={"message": "rahasia A"}, headers=_auth(t))
-    assert r.status_code in (200, 502)
-    r_list = client.get("/api/v1/conversations", headers=_auth(t))
-    cid = r_list.json()[0]["id"]
+    Base.metadata.create_all(bind=engine)
 
-    # user B tidak boleh lihat
-    r2 = client.post(
-        "/api/v1/auth/register",
-        json={"email": "b@test.ac.id", "password": "password123"},
+    token_a = _register(_new_email())
+    token_b = _register(_new_email())
+
+    _create_chat(token_a, "rahasia-A")
+    item = _find_conversation(token_a, "rahasia-A")
+
+    response = client.get(
+        f"/api/v1/conversations/{item['id']}",
+        headers=_auth(token_b),
     )
-    t2 = r2.json()["access_token"]
-    r3 = client.get(f"/api/v1/conversations/{cid}", headers=_auth(t2))
-    assert r3.status_code == 404
+    assert response.status_code == 404
 
-    # delete milik user B ke percakapan A juga 404
-    r4 = client.delete(f"/api/v1/conversations/{cid}", headers=_auth(t2))
-    assert r4.status_code == 404
+    response = client.delete(
+        f"/api/v1/conversations/{item['id']}",
+        headers=_auth(token_b),
+    )
+    assert response.status_code == 404
 
 
 def test_delete_conversation():
-    t = _token()
-    r = client.post("/api/v1/chat", json={"message": "hapus aku"}, headers=_auth(t))
-    assert r.status_code in (200, 502)
-    r_list = client.get("/api/v1/conversations", headers=_auth(t))
-    cid = r_list.json()[0]["id"]
-    r2 = client.delete(f"/api/v1/conversations/{cid}", headers=_auth(t))
-    assert r2.status_code == 200
-    r3 = client.get(f"/api/v1/conversations/{cid}", headers=_auth(t))
-    assert r3.status_code == 404
+    Base.metadata.create_all(bind=engine)
+
+    token = _register(_new_email())
+    _create_chat(token, "hapus-aku")
+    item = _find_conversation(token, "hapus-aku")
+
+    response = client.delete(
+        f"/api/v1/conversations/{item['id']}",
+        headers=_auth(token),
+    )
+    assert response.status_code == 200, response.text
+
+    response = client.get(
+        f"/api/v1/conversations/{item['id']}",
+        headers=_auth(token),
+    )
+    assert response.status_code == 404

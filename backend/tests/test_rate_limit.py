@@ -1,112 +1,200 @@
-"""Tes rate limiting harian."""
-import os
-from datetime import datetime, timezone
+"""Tes kuota token harian WIT."""
 
-os.environ.setdefault("OPENAI_API_KEY", "test-key-dummy")
-os.environ.setdefault("DATABASE_URL", "sqlite:///./test_rate.db")
+import uuid
+from datetime import timedelta, timezone, datetime
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from app.main import app  # noqa: E402
-from app.models.database import Base, engine, SessionLocal  # noqa: E402
-from app.models.token_usage import TokenUsage  # noqa: E402
-from app.models.user import User  # noqa: E402
-from app.services.auth_service import hash_password  # noqa: E402
+from app.main import app
+from app.models.database import Base, engine, SessionLocal
+from app.models.token_usage import TokenUsage
+from app.models.token_reservation import TokenReservation
+from app.models.user import User
+from app.services.auth_service import hash_password
+from app.services.quota_service import current_day_utc_range
 
 client = TestClient(app)
-
-USER = "rate@test.ac.id"
-ADMIN = "rateadmin@test.ac.id"
 PW = "password123"
 
 
-def setup_function():
+def _create_user(role="user"):
     Base.metadata.create_all(bind=engine)
+
+    email = f"rate-{uuid.uuid4().hex}@test.ac.id"
     db = SessionLocal()
+
     try:
-        if not db.query(User).filter(User.email == ADMIN).first():
-            db.add(User(email=ADMIN, password_hash=hash_password(PW), role="admin", status="active"))
-        if not db.query(User).filter(User.email == USER).first():
-            db.add(User(email=USER, password_hash=hash_password(PW), role="user", status="active"))
+        user = User(
+            email=email,
+            password_hash=hash_password(PW),
+            role=role,
+            status="active",
+            is_active=True,
+        )
+        db.add(user)
         db.commit()
+        db.refresh(user)
+        return email, user.id
     finally:
         db.close()
 
 
 def _login(email):
-    r = client.post("/api/v1/auth/login", data={"username": email, "password": PW})
-    return {"Authorization": f"Bearer {r.json()['access_token']}"}
+    response = client.post(
+        "/api/v1/auth/login",
+        data={"username": email, "password": PW},
+    )
+    assert response.status_code == 200, response.text
+
+    return {
+        "Authorization": f"Bearer {response.json()['access_token']}"
+    }
 
 
-def _fill_usage(email, n):
-    """Isi n catatan token hari ini untuk simulasi pemakaian."""
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.email == email).first()
-        for _ in range(n):
-            db.add(
-                TokenUsage(
-                    user_id=user.id,
-                    skill="general",
-                    prompt_tokens=10,
-                    completion_tokens=5,
-                    total_tokens=15,
-                )
-            )
-        db.commit()
-    finally:
-        db.close()
+def test_quota_endpoint_default_starter():
+    email, _ = _create_user()
+    headers = _login(email)
 
+    response = client.get("/api/v1/quota", headers=headers)
 
-def test_quota_endpoint():
-    h = _login(USER)
-    r = client.get("/api/v1/quota", headers=h)
-    assert r.status_code == 200
-    data = r.json()
-    assert data["limit"] == 50  # default
-    assert data["used"] == 0
-    assert data["remaining"] == 50
+    assert response.status_code == 200
+    data = response.json()
+
     assert data["unlimited"] is False
+    assert data["daily_limit"] == 50000
+    assert data["daily_used"] == 0
+    assert data["daily_remaining"] == 50000
+    assert data["topup_balance"] == 0
+    assert data["timezone"] == "Asia/Jayapura"
 
 
 def test_quota_admin_unlimited():
-    h = _login(ADMIN)
-    r = client.get("/api/v1/quota", headers=h)
-    assert r.status_code == 200
-    assert r.json()["unlimited"] is True
+    email, _ = _create_user(role="admin")
+    headers = _login(email)
+
+    response = client.get("/api/v1/quota", headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["unlimited"] is True
+    assert data["daily_limit"] is None
+    assert data["daily_remaining"] is None
 
 
-def test_chat_blocked_after_limit():
-    h = _login(USER)
-    # simulasi sudah pakai 50 chat hari ini
-    _fill_usage(USER, 50)
-    r = client.post("/api/v1/chat", json={"message": "halo"}, headers=h)
-    assert r.status_code == 429, r.text
-    assert "Kuota harian habis" in r.json()["detail"]
+def test_quota_counts_package_tokens_and_reservations():
+    email, user_id = _create_user()
+    headers = _login(email)
 
-    # quota endpoint juga menunjukkan habis
-    r2 = client.get("/api/v1/quota", headers=h)
-    assert r2.json()["remaining"] == 0
+    start_utc, _ = current_day_utc_range()
+    yesterday = start_utc - timedelta(seconds=1)
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
 
-
-def test_admin_not_blocked():
-    h = _login(ADMIN)
-    _fill_usage(ADMIN, 100)  # lebih dari limit user biasa
-    # admin chat -> bukan 429 (akan 502 karena dummy AI key, itu bukan rate limit)
-    r = client.post("/api/v1/chat", json={"message": "tes admin"}, headers=h)
-    assert r.status_code != 429
-
-
-def test_quota_counts_only_today():
-    h = _login(USER)
-    # hapus semua usage lalu isi 2 -> used harus 2
     db = SessionLocal()
+
     try:
-        db.query(TokenUsage).delete()
+        # Pemakaian paket yang sudah selesai.
+        db.add(
+            TokenUsage(
+                user_id=user_id,
+                skill="general",
+                prompt_tokens=100,
+                completion_tokens=0,
+                total_tokens=100,
+                package_tokens=100,
+                created_at=now_utc,
+            )
+        )
+
+        # Pemakaian hari sebelumnya tidak boleh dihitung.
+        db.add(
+            TokenUsage(
+                user_id=user_id,
+                skill="general",
+                prompt_tokens=999,
+                completion_tokens=0,
+                total_tokens=999,
+                package_tokens=999,
+                created_at=yesterday,
+            )
+        )
+
+        # Reservasi pending ikut dihitung.
+        db.add(
+            TokenReservation(
+                user_id=user_id,
+                reserved_daily=50,
+                reserved_topup=200,
+                status="pending",
+                reference="test-pending",
+                description="Test reservasi pending",
+                created_at=now_utc,
+            )
+        )
+
+        # Reservasi needs_review juga ikut dihitung.
+        db.add(
+            TokenReservation(
+                user_id=user_id,
+                reserved_daily=25,
+                reserved_topup=0,
+                status="needs_review",
+                reference="test-review",
+                description="Test reservasi review",
+                created_at=now_utc,
+            )
+        )
+
         db.commit()
     finally:
         db.close()
-    _fill_usage(USER, 2)
-    r = client.get("/api/v1/quota", headers=h)
-    assert r.json()["used"] == 2
-    assert r.json()["remaining"] == 48
+
+    response = client.get("/api/v1/quota", headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()
+
+    # 100 pemakaian + 50 pending + 25 needs_review.
+    # 999 token kemarin dan 200 token Top Up tidak dihitung.
+    assert data["daily_used"] == 175
+    assert data["daily_remaining"] == 49825
+
+
+def test_quota_counts_only_current_wit_day():
+    email, user_id = _create_user()
+    headers = _login(email)
+
+    start_utc, _ = current_day_utc_range()
+    yesterday = start_utc - timedelta(seconds=1)
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    db = SessionLocal()
+
+    try:
+        db.add_all([
+            TokenUsage(
+                user_id=user_id,
+                skill="general",
+                total_tokens=100,
+                package_tokens=100,
+                created_at=now_utc,
+            ),
+            TokenUsage(
+                user_id=user_id,
+                skill="general",
+                total_tokens=500,
+                package_tokens=500,
+                created_at=yesterday,
+            ),
+        ])
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.get("/api/v1/quota", headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["daily_used"] == 100
+    assert data["daily_remaining"] == 49900

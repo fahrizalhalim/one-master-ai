@@ -28,13 +28,75 @@ type Stats = {
 
 type Skill = { name: string; instruction_file: string; chars: number };
 
+type TelegramPendingItem = {
+  id: string;
+  user_id: string;
+  bot_username: string;
+  status: string;
+  created_at: string | null;
+  user_name: string;
+  user_email: string;
+};
+
 type TokenRow = {
+  user_id: string;
   email: string;
   full_name: string;
+  role: string;
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
   requests: number;
+  topup_balance: number;
+  daily_limit: number | null;
+  daily_used: number;
+  daily_remaining: number | null;
+};
+
+type ReservationReview = {
+  reservation_id: string;
+  user_id: string;
+  email: string;
+  full_name: string;
+  reservation_status: string;
+  result_status: string | null;
+  reserved_topup: number;
+  reserved_daily: number;
+  actual_tokens: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  skill: string | null;
+  assistant_message_id: string | null;
+  result_preview: string | null;
+  reference: string | null;
+  description: string | null;
+  created_at: string | null;
+  expires_at: string | null;
+  completed_at: string | null;
+  result_created_at: string | null;
+};
+
+type TopUpAdminRequest = {
+  id: string;
+  package_code: string;
+  amount_idr: number;
+  token_amount: number;
+  status: "pending" | "approved" | "rejected";
+  admin_note: string;
+  created_at: string | null;
+  reviewed_at: string | null;
+  user_id: string;
+  user_name: string;
+  user_email: string;
+};
+
+type ProtectedAdminAction = {
+  title: string;
+  url: string;
+  method: "POST" | "PATCH" | "DELETE";
+  body: Record<string, unknown>;
+  successMessage: string;
 };
 
 export default function AdminPage() {
@@ -44,12 +106,22 @@ export default function AdminPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
-  const [tab, setTab] = useState<"users" | "skills" | "tokens" | "pending">("users");
+  const [tab, setTab] = useState<"users" | "skills" | "tokens" | "pending" | "topups" | "review" | "telegram">("users");
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [tokenRows, setTokenRows] = useState<TokenRow[]>([]);
   const [pending, setPending] = useState<AdminUser[]>([]);
-
+  const [telegramPending, setTelegramPending] = useState<TelegramPendingItem[]>([]);
+  const [topupRequests, setTopupRequests] = useState<TopUpAdminRequest[]>([]);
+  const [reservationReviews, setReservationReviews] = useState<ReservationReview[]>([]);
+  const [topupBusy, setTopupBusy] = useState<string | null>(null);
+  const [proofUrl, setProofUrl] = useState<string | null>(null);
+  const [proofType, setProofType] = useState("");
+  const [proofBusy, setProofBusy] = useState<string | null>(null);
+  const [pendingAdminAction, setPendingAdminAction] =
+    useState<ProtectedAdminAction | null>(null);
+  const [adminPassword, setAdminPassword] = useState("");
+  const [adminActionBusy, setAdminActionBusy] = useState(false);
   const headers = useCallback(
     () => ({ Authorization: `Bearer ${token}` }),
     [token]
@@ -58,12 +130,19 @@ export default function AdminPage() {
   const load = useCallback(async () => {
     if (!token) return;
     try {
-      const [s, u, k, tk, pd] = await Promise.all([
+      const [s, u, k, tk, pd, rv, tp, tg] = await Promise.all([
         fetch(`${API_URL}/api/v1/admin/stats`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/users`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/skills`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/tokens`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/pending`, { headers: headers() }),
+        fetch(`${API_URL}/api/v1/admin/reservations/review`, { headers: headers() }),
+        fetch(`${API_URL}/api/v1/topup/admin/requests?status_filter=pending`, {
+          headers: headers(),
+        }),
+        fetch(`${API_URL}/api/v1/admin/telegram/pending`, {
+          headers: headers(),
+        }),
       ]);
       if (s.status === 403) {
         router.replace("/");
@@ -74,6 +153,15 @@ export default function AdminPage() {
       if (k.ok) setSkills(await k.json());
       if (tk.ok) setTokenRows(await tk.json());
       if (pd.ok) setPending(await pd.json());
+      if (tg.ok) setTelegramPending(await tg.json());
+      if (rv.ok) {
+        const reviewData = await rv.json();
+        setReservationReviews(reviewData.items || []);
+      }
+      if (tp.ok) {
+        const topupData = await tp.json();
+        setTopupRequests(topupData.requests || []);
+      }
     } catch {
       setError("Gagal memuat data admin.");
     }
@@ -87,80 +175,224 @@ export default function AdminPage() {
     if (token) load();
   }, [token, load]);
 
+  useEffect(() => {
+    if (!token || user?.role !== "admin") return;
+    const timer = window.setInterval(() => load(), 30000);
+    return () => window.clearInterval(timer);
+  }, [token, user?.role, load]);
+
+  useEffect(() => {
+    return () => {
+      if (proofUrl) URL.revokeObjectURL(proofUrl);
+    };
+  }, [proofUrl]);
+
   function flash(msg: string) {
     setToast(msg);
     setTimeout(() => setToast(null), 2500);
   }
 
-  async function toggleActive(u: AdminUser) {
-    const res = await fetch(`${API_URL}/api/v1/admin/users/${u.id}/active`, {
-      method: "PATCH",
-      headers: { ...headers(), "Content-Type": "application/json" },
-      body: JSON.stringify({ is_active: !u.is_active }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setError(data.detail || "Gagal");
+  function requestAdminPassword(action: ProtectedAdminAction) {
+    setError(null);
+    setAdminPassword("");
+    setPendingAdminAction(action);
+  }
+
+  async function submitAdminPassword() {
+    if (!pendingAdminAction || adminActionBusy) return;
+
+    if (!adminPassword.trim()) {
+      setError("Masukkan password login admin.");
       return;
     }
-    setUsers((list) =>
-      list.map((x) => (x.id === u.id ? { ...x, is_active: data.is_active } : x))
+
+    setAdminActionBusy(true);
+    setError(null);
+
+    try {
+      const res = await fetch(pendingAdminAction.url, {
+        method: pendingAdminAction.method,
+        headers: {
+          ...headers(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ...pendingAdminAction.body,
+          admin_password: adminPassword,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        setError(data.detail || "Tindakan admin gagal.");
+        setAdminPassword("");
+        return;
+      }
+
+      const successMessage =
+        data.detail || pendingAdminAction.successMessage;
+
+      setPendingAdminAction(null);
+      setAdminPassword("");
+      await load();
+      flash(successMessage);
+    } catch {
+      setError("Tidak dapat menghubungi server.");
+    } finally {
+      setAdminActionBusy(false);
+    }
+  }
+
+  function settleReservation(r: ReservationReview) {
+    const maxInteger = 2_147_483_647;
+    const prompt = r.prompt_tokens;
+    const completion = r.completion_tokens;
+    const total = r.total_tokens;
+
+    if (
+      !["pending", "needs_review"].includes(r.reservation_status) ||
+      !["received", "needs_review"].includes(r.result_status || "") ||
+      prompt === null ||
+      completion === null ||
+      total === null ||
+      !Number.isSafeInteger(prompt) ||
+      !Number.isSafeInteger(completion) ||
+      !Number.isSafeInteger(total) ||
+      prompt < 0 ||
+      completion < 0 ||
+      total <= 0 ||
+      prompt > maxInteger ||
+      completion > maxInteger ||
+      total > maxInteger ||
+      prompt + completion !== total ||
+      !r.skill
+    ) {
+      setError("Bukti token belum memenuhi syarat settlement. Periksa status dan data token.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Setujui settlement reservasi untuk ${r.email}?\\n\\n` +
+      `Token input: ${prompt.toLocaleString("id-ID")}\\n` +
+      `Token output: ${completion.toLocaleString("id-ID")}\\n` +
+      `Total pemakaian aktual: ${total.toLocaleString("id-ID")} token\\n\\n` +
+      "Saldo reservasi akan disesuaikan berdasarkan pemakaian aktual. Tindakan ini tidak dapat dibatalkan."
     );
-    flash(`${u.email} ${data.is_active ? "diaktifkan" : "dinonaktifkan"}.`);
+
+    if (!confirmed) return;
+
+    requestAdminPassword({
+      title: `Konfirmasi settlement ${total.toLocaleString("id-ID")} token untuk ${r.email}`,
+      url: `${API_URL}/api/v1/admin/reservations/${r.reservation_id}/settle`,
+      method: "POST",
+      body: {},
+      successMessage: `Settlement ${total.toLocaleString("id-ID")} token untuk ${r.email} berhasil.`,
+    });
+  }
+
+  async function resetTokenBalance(r: TokenRow) {
+    const confirmed = window.confirm(
+      `Reset saldo token ${r.email}?\n\n` +
+      `Saldo saat ini: ${r.topup_balance.toLocaleString("id-ID")} token.\n` +
+      `Saldo akan menjadi 0. Riwayat pemakaian tidak berubah.`
+    );
+    if (!confirmed) return;
+
+    requestAdminPassword({
+      title: `Konfirmasi reset saldo token ${r.email}`,
+      url: `${API_URL}/api/v1/admin/tokens/${r.user_id}/reset-balance`,
+      method: "POST",
+      body: {},
+      successMessage: `Saldo token ${r.email} berhasil direset.`,
+    });
+  }
+
+  async function addTokenBalance(r: TokenRow) {
+    const raw = window.prompt(
+      `Jumlah token yang akan ditambahkan untuk ${r.email}:`,
+      "100000"
+    );
+
+    if (raw === null) return;
+
+    const amount = Number(raw.trim());
+
+    if (!Number.isSafeInteger(amount) || amount <= 0) {
+      setError("Jumlah token harus bilangan bulat positif yang valid.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Tambahkan ${amount.toLocaleString("id-ID")} token ke ${r.email}?\n\n` +
+      `Saldo saat ini: ${r.topup_balance.toLocaleString("id-ID")} token.\n` +
+      `Saldo setelah penambahan: ${(r.topup_balance + amount).toLocaleString("id-ID")} token.`
+    );
+
+    if (!confirmed) return;
+
+    requestAdminPassword({
+      title: `Konfirmasi penambahan ${amount.toLocaleString("id-ID")} token untuk ${r.email}`,
+      url: `${API_URL}/api/v1/admin/tokens/${r.user_id}/add-balance`,
+      method: "POST",
+      body: { amount },
+      successMessage: `Saldo token ${r.email} berhasil ditambahkan.`,
+    });
+  }
+
+  async function toggleActive(u: AdminUser) {
+    const nextActive = !u.is_active;
+
+    requestAdminPassword({
+      title: `Konfirmasi ${nextActive ? "mengaktifkan" : "menonaktifkan"} akun ${u.email}`,
+      url: `${API_URL}/api/v1/admin/users/${u.id}/active`,
+      method: "PATCH",
+      body: { is_active: nextActive },
+      successMessage: `${u.email} ${nextActive ? "diaktifkan" : "dinonaktifkan"}.`,
+    });
   }
 
   async function toggleRole(u: AdminUser) {
     const newRole = u.role === "admin" ? "user" : "admin";
-    const res = await fetch(`${API_URL}/api/v1/admin/users/${u.id}/role`, {
+
+    requestAdminPassword({
+      title: `Konfirmasi perubahan role ${u.email} menjadi ${newRole}`,
+      url: `${API_URL}/api/v1/admin/users/${u.id}/role`,
       method: "PATCH",
-      headers: { ...headers(), "Content-Type": "application/json" },
-      body: JSON.stringify({ role: newRole }),
+      body: { role: newRole },
+      successMessage: `Role ${u.email} berhasil diubah menjadi ${newRole}.`,
     });
-    const data = await res.json();
-    if (!res.ok) {
-      setError(data.detail || "Gagal");
-      return;
-    }
-    setUsers((list) =>
-      list.map((x) => (x.id === u.id ? { ...x, role: data.role } : x))
-    );
-    flash(`Role ${u.email} → ${data.role}.`);
   }
 
   async function removeUser(u: AdminUser) {
-    const res = await fetch(`${API_URL}/api/v1/admin/users/${u.id}`, {
+    requestAdminPassword({
+      title: `HAPUS PERMANEN akun ${u.email}. Masukkan password login admin untuk melanjutkan.`,
+      url: `${API_URL}/api/v1/admin/users/${u.id}`,
       method: "DELETE",
-      headers: headers(),
+      body: {},
+      successMessage: `Akun ${u.email} berhasil dihapus.`,
     });
-    const data = await res.json();
-    if (!res.ok) {
-      setError(data.detail || "Gagal");
-      return;
-    }
-    setUsers((list) => list.filter((x) => x.id !== u.id));
-    flash(`${u.email} dihapus.`);
-    load();
   }
 
   async function resetPassword(u: AdminUser) {
-    const newPw = prompt(
-      `Password baru untuk ${u.email} (min. 8 karakter):`
+    const newPw = window.prompt(
+      `Password baru untuk ${u.email} (minimal 8 karakter):`
     );
-    if (!newPw) return;
-    const res = await fetch(
-      `${API_URL}/api/v1/admin/users/${u.id}/reset-password`,
-      {
-        method: "POST",
-        headers: { ...headers(), "Content-Type": "application/json" },
-        body: JSON.stringify({ new_password: newPw }),
-      }
-    );
-    const data = await res.json();
-    if (!res.ok) {
-      setError(data.detail || "Gagal");
+
+    if (newPw === null) return;
+
+    if (newPw.length < 8) {
+      setError("Password baru minimal 8 karakter.");
       return;
     }
-    flash(`Password ${u.email} direset.`);
+
+    requestAdminPassword({
+      title: `Konfirmasi reset password akun ${u.email}`,
+      url: `${API_URL}/api/v1/admin/users/${u.id}/reset-password`,
+      method: "POST",
+      body: { new_password: newPw },
+      successMessage: `Password ${u.email} berhasil direset.`,
+    });
   }
 
   async function decide(u: AdminUser, decision: "approve" | "reject") {
@@ -186,6 +418,122 @@ export default function AdminPage() {
     load();
   }
 
+  async function decideTelegram(
+    account: TelegramPendingItem,
+    decision: "approve" | "reject"
+  ) {
+    setError(null);
+
+    try {
+      const res = await fetch(
+        `${API_URL}/api/v1/admin/telegram/${account.id}/decision`,
+        {
+          method: "POST",
+          headers: { ...headers(), "Content-Type": "application/json" },
+          body: JSON.stringify({ decision }),
+        }
+      );
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        setError(data.detail || "Gagal memproses persetujuan Telegram.");
+        return;
+      }
+
+      setTelegramPending((items) =>
+        items.filter((item) => item.id !== account.id)
+      );
+
+      flash(
+        decision === "approve"
+          ? `✅ @${account.bot_username} disetujui. Menunggu aktivasi teknis.`
+          : `⛔ @${account.bot_username} ditolak.`
+      );
+
+      await load();
+    } catch {
+      setError("Tidak dapat menghubungi server untuk memproses Telegram.");
+    }
+  }
+
+  async function openTopupProof(request: TopUpAdminRequest) {
+    setProofBusy(request.id);
+    setError(null);
+
+    try {
+      const res = await fetch(
+        `${API_URL}/api/v1/topup/admin/requests/${request.id}/proof`,
+        { headers: headers() }
+      );
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Gagal membuka bukti pembayaran.");
+      }
+
+      const blob = await res.blob();
+      if (proofUrl) URL.revokeObjectURL(proofUrl);
+      setProofType(res.headers.get("content-type") || blob.type);
+      setProofUrl(URL.createObjectURL(blob));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Gagal membuka bukti pembayaran.");
+    } finally {
+      setProofBusy(null);
+    }
+  }
+
+  async function reviewTopup(
+    request: TopUpAdminRequest,
+    decision: "approved" | "rejected"
+  ) {
+    let note = "";
+
+    if (decision === "approved") {
+      if (!window.confirm(
+        `Setujui Top Up ${request.user_email} sebesar ${request.token_amount.toLocaleString("id-ID")} token?`
+      )) return;
+    } else {
+      const answer = window.prompt(
+        `Alasan penolakan untuk ${request.user_email} (boleh dikosongkan):`
+      );
+      if (answer === null) return;
+      note = answer;
+    }
+
+    setTopupBusy(request.id);
+    setError(null);
+
+    try {
+      const res = await fetch(
+        `${API_URL}/api/v1/topup/admin/requests/${request.id}/review`,
+        {
+          method: "POST",
+          headers: {
+            ...headers(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            decision,
+            admin_note: note,
+          }),
+        }
+      );
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || "Gagal memproses pengajuan Top Up.");
+      }
+
+      flash(data.message || "Pengajuan berhasil diproses.");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Gagal memproses Top Up.");
+    } finally {
+      setTopupBusy(null);
+    }
+  }
+
   if (loading || !token || !user) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-gray-950 text-gray-400">
@@ -199,12 +547,12 @@ export default function AdminPage() {
   return (
     <main className="min-h-screen bg-gray-950 text-gray-100">
       {/* Header */}
-      <header className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
-        <h1 className="text-xl font-bold">👑 Panel SuperAdmin</h1>
-        <div className="flex gap-2">
+      <header className="flex items-center justify-between gap-2 border-b border-gray-800 px-3 py-3 sm:px-6 sm:py-4">
+        <h1 className="text-base font-bold sm:text-xl">👑 Panel SuperAdmin</h1>
+        <div className="flex shrink-0 gap-2">
           <a
             href="/"
-            className="rounded-lg border border-gray-700 px-4 py-1.5 text-sm text-gray-300 hover:bg-gray-800"
+            className="rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800 sm:px-4 sm:text-sm"
           >
             ← Chat
           </a>
@@ -229,9 +577,9 @@ export default function AdminPage() {
           </p>
         </div>
       ) : (
-        <div className="mx-auto max-w-6xl px-6 py-8">
+        <div className="mx-auto max-w-6xl px-3 py-4 sm:px-6 sm:py-8">
           {/* Statistik */}
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+          <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-5">
             {stats && (
               <>
                 <StatCard icon="👥" label="Total User" value={stats.total_users} />
@@ -244,10 +592,23 @@ export default function AdminPage() {
           </div>
 
           {/* Tabs */}
-          <div className="mt-8 grid max-w-2xl grid-cols-4 gap-2 rounded-xl bg-gray-900 p-1 text-sm">
+          <div className="mt-5 flex max-w-full gap-2 overflow-x-auto rounded-xl bg-gray-900 p-2 text-sm">
+            <button
+              onClick={() => setTab("topups")}
+              className={`relative min-w-max shrink-0 rounded-lg px-3 py-3 font-medium ${
+                tab === "topups" ? "bg-blue-600" : "text-gray-400"
+              }`}
+            >
+              💳 Pembayaran
+              {topupRequests.length > 0 && (
+                <span className="absolute -top-1 -right-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-xs text-white">
+                  {topupRequests.length}
+                </span>
+              )}
+            </button>
             <button
               onClick={() => setTab("users")}
-              className={`rounded-lg py-2 font-medium ${
+              className={`min-w-max shrink-0 rounded-lg px-3 py-3 font-medium ${
                 tab === "users" ? "bg-blue-600" : "text-gray-400"
               }`}
             >
@@ -255,7 +616,7 @@ export default function AdminPage() {
             </button>
             <button
               onClick={() => setTab("pending")}
-              className={`rounded-lg py-2 font-medium relative ${
+              className={`relative min-w-max shrink-0 rounded-lg px-3 py-3 font-medium ${
                 tab === "pending" ? "bg-blue-600" : "text-gray-400"
               }`}
             >
@@ -267,22 +628,50 @@ export default function AdminPage() {
               )}
             </button>
             <button
+              onClick={() => setTab("telegram")}
+              className={`relative min-w-max shrink-0 rounded-lg px-3 py-3 font-medium ${
+                tab === "telegram" ? "bg-blue-600" : "text-gray-400"
+              }`}
+            >
+              🤖 Telegram
+              {telegramPending.length > 0 && (
+                <span className="absolute -top-1 -right-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-xs text-white">
+                  {telegramPending.length}
+                </span>
+              )}
+            </button>
+
+            <button
               onClick={() => setTab("tokens")}
-              className={`rounded-lg py-2 font-medium ${
+              className={`min-w-max shrink-0 rounded-lg px-3 py-3 font-medium ${
                 tab === "tokens" ? "bg-blue-600" : "text-gray-400"
               }`}
             >
               🎯 Token
             </button>
+
+            <button
+              onClick={() => setTab("review")}
+              className={`relative min-w-max shrink-0 rounded-lg px-3 py-3 font-medium ${
+                tab === "review" ? "bg-blue-600" : "text-gray-400"
+              }`}
+            >
+              🛡️ Review Token
+              {reservationReviews.length > 0 && (
+                <span className="absolute -top-1 -right-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500 px-1 text-xs text-black">
+                  {reservationReviews.length}
+                </span>
+              )}
+            </button>
             <button
               onClick={() => setTab("skills")}
-              className={`rounded-lg py-2 font-medium ${
+              className={`min-w-max shrink-0 rounded-lg px-3 py-3 font-medium ${
                 tab === "skills" ? "bg-blue-600" : "text-gray-400"
               }`}
             >
               🧩 Skill
             </button>
-          </div>
+               </div>
 
           {error && (
             <p className="mt-4 rounded-lg bg-red-900/40 px-3 py-2 text-sm text-red-300">
@@ -337,6 +726,189 @@ export default function AdminPage() {
                     </div>
                   </div>
                 ))
+              )}
+            </div>
+          )}
+
+          {/* Tab persetujuan koneksi Telegram */}
+          {tab === "telegram" && (
+            <div className="mt-6 space-y-3">
+              <div className="rounded-xl border border-blue-800/50 bg-blue-950/20 p-4 text-sm text-blue-200">
+                Persetujuan ini hanya menyetujui pendaftaran bot. Webhook,
+                pengaitan pemilik Telegram, dan pemrosesan pesan belum aktif.
+              </div>
+
+              {telegramPending.length === 0 ? (
+                <div className="rounded-xl border border-gray-800 bg-gray-900 p-8 text-center text-gray-500">
+                  ✅ Tidak ada permintaan koneksi Telegram yang menunggu.
+                </div>
+              ) : (
+                telegramPending.map((account) => (
+                  <div
+                    key={account.id}
+                    className="flex flex-col gap-3 rounded-xl border border-amber-700/40 bg-gray-900 p-4 md:flex-row md:items-center md:justify-between"
+                  >
+                    <div>
+                      <p className="font-semibold">
+                        🤖 @{account.bot_username}
+                      </p>
+                      <p className="mt-1 text-sm text-gray-300">
+                        {account.user_name || "Nama tidak tersedia"} ({account.user_email})
+                      </p>
+                      <p className="mt-1 text-xs text-gray-500">
+                        Diajukan{" "}
+                        {account.created_at
+                          ? new Date(account.created_at).toLocaleString("id-ID")
+                          : "—"}
+                      </p>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => decideTelegram(account, "approve")}
+                        className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500"
+                      >
+                        ✅ Setujui
+                      </button>
+                      <button
+                        onClick={() => decideTelegram(account, "reject")}
+                        className="rounded-lg border border-red-700/50 px-4 py-2 text-sm font-semibold text-red-300 hover:bg-red-900/40"
+                      >
+                        ⛔ Tolak
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+          {/* Tab persetujuan pembayaran Top Up */}
+          {tab === "topups" && (
+            <div className="mt-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-800 bg-gray-900 p-4">
+                <div>
+                  <h2 className="font-semibold">Persetujuan Pembayaran Top Up</h2>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Periksa bukti QRIS sebelum menyetujui penambahan saldo token.
+                  </p>
+                </div>
+                <button
+                  onClick={load}
+                  className="rounded-lg bg-gray-700 px-3 py-2 text-xs hover:bg-gray-600"
+                >
+                  ↻ Muat Ulang
+                </button>
+              </div>
+
+              {topupRequests.length === 0 ? (
+                <div className="rounded-xl border border-gray-800 bg-gray-900 p-8 text-center text-gray-500">
+                  ✅ Tidak ada pembayaran yang menunggu persetujuan.
+                </div>
+              ) : (
+                topupRequests.map((request) => (
+                  <div
+                    key={request.id}
+                    className="rounded-xl border border-amber-700/40 bg-gray-900 p-4"
+                  >
+                    <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                      <div className="min-w-0">
+                        <p className="font-semibold">
+                          {request.user_name || "Pengguna"}
+                        </p>
+                        <p className="text-sm text-gray-400">{request.user_email}</p>
+                        <div className="mt-3 space-y-1 text-sm">
+                          <p>
+                            Paket: <span className="font-semibold">{request.package_code}</span>
+                          </p>
+                          <p>
+                            Pembayaran:{" "}
+                            <span className="font-semibold text-amber-300">
+                              {new Intl.NumberFormat("id-ID", {
+                                style: "currency",
+                                currency: "IDR",
+                                maximumFractionDigits: 0,
+                              }).format(request.amount_idr)}
+                            </span>
+                          </p>
+                          <p>
+                            Token:{" "}
+                            <span className="font-semibold text-emerald-300">
+                              {request.token_amount.toLocaleString("id-ID")}
+                            </span>
+                          </p>
+                          <p className="text-xs text-gray-500">
+                            Diajukan:{" "}
+                            {request.created_at
+                              ? new Date(request.created_at).toLocaleString("id-ID", {
+                                  dateStyle: "medium",
+                                  timeStyle: "short",
+                                  timeZone: "Asia/Jayapura",
+                                })
+                              : "-"}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={() => openTopupProof(request)}
+                          disabled={proofBusy === request.id}
+                          className="rounded-lg border border-blue-600/50 px-3 py-2 text-sm text-blue-300 hover:bg-blue-900/30 disabled:opacity-50"
+                        >
+                          {proofBusy === request.id ? "Memuat..." : "📎 Lihat Bukti"}
+                        </button>
+                        <button
+                          onClick={() => reviewTopup(request, "approved")}
+                          disabled={topupBusy === request.id}
+                          className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                        >
+                          {topupBusy === request.id ? "Memproses..." : "✅ Setujui"}
+                        </button>
+                        <button
+                          onClick={() => reviewTopup(request, "rejected")}
+                          disabled={topupBusy === request.id}
+                          className="rounded-lg border border-red-700/50 px-3 py-2 text-sm text-red-300 hover:bg-red-900/30 disabled:opacity-50"
+                        >
+                          ⛔ Tolak
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+
+              {proofUrl && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+                  <div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-xl border border-gray-700 bg-gray-900 p-4">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <h3 className="font-semibold">Bukti Pembayaran</h3>
+                      <button
+                        onClick={() => {
+                          URL.revokeObjectURL(proofUrl);
+                          setProofUrl(null);
+                          setProofType("");
+                        }}
+                        className="rounded-lg border border-gray-700 px-3 py-1 text-sm hover:bg-gray-800"
+                      >
+                        ✕ Tutup
+                      </button>
+                    </div>
+                    {proofType.startsWith("image/") ? (
+                      <img
+                        src={proofUrl}
+                        alt="Bukti pembayaran Top Up"
+                        className="max-h-[75vh] w-full rounded-lg object-contain"
+                      />
+                    ) : (
+                      <iframe
+                        src={proofUrl}
+                        title="Bukti pembayaran PDF"
+                        className="h-[75vh] w-full rounded-lg bg-white"
+                      />
+                    )}
+                  </div>
+                </div>
               )}
             </div>
           )}
@@ -422,12 +994,16 @@ export default function AdminPage() {
                     <th className="px-4 py-3 text-right">Input</th>
                     <th className="px-4 py-3 text-right">Output</th>
                     <th className="px-4 py-3 text-right">Total Token</th>
+                    <th className="px-4 py-3 text-right">Pemakaian Hari Ini</th>
+                    <th className="px-4 py-3 text-right">Batas Harian</th>
+                    <th className="px-4 py-3 text-right">Saldo Token</th>
+                    <th className="px-4 py-3 text-center">Aksi</th>
                   </tr>
                 </thead>
                 <tbody>
                   {tokenRows.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="px-4 py-6 text-center text-gray-500">
+                      <td colSpan={10} className="px-4 py-6 text-center text-gray-500">
                         Belum ada pemakaian token tercatat
                       </td>
                     </tr>
@@ -446,6 +1022,43 @@ export default function AdminPage() {
                       <td className="px-4 py-3 text-right font-semibold text-amber-300">
                         {r.total_tokens.toLocaleString("id-ID")}
                       </td>
+                      <td className="px-4 py-3 text-right text-blue-300">
+                        {r.daily_used.toLocaleString("id-ID")}
+                      </td>
+                      <td className="px-4 py-3 text-right text-gray-300">
+                        {r.daily_limit === null
+                          ? "Tanpa batas"
+                          : r.daily_limit.toLocaleString("id-ID")}
+                        <p className="text-xs text-gray-500">
+                          Sisa: {r.daily_remaining === null
+                            ? "—"
+                            : r.daily_remaining.toLocaleString("id-ID")}
+                        </p>
+                      </td>
+                      <td className="px-4 py-3 text-right font-semibold text-emerald-300">
+                        {r.topup_balance.toLocaleString("id-ID")}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        {r.role !== "admin" && (
+                          <div className="flex flex-wrap justify-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => addTokenBalance(r)}
+                            className="rounded-lg border border-emerald-700 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-950"
+                          >
+                            Tambah Saldo
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => resetTokenBalance(r)}
+                            disabled={r.topup_balance === 0}
+                            className="rounded-lg border border-red-700 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-950 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            Reset Saldo
+                          </button>
+                          </div>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -454,6 +1067,148 @@ export default function AdminPage() {
                 * Estimasi biaya ≈ total_token ÷ 1.000.000 × harga per juta token
                 di dashboard Sumopod Anda.
               </p>
+            </div>
+          )}
+
+          {/* Monitoring Review Token - baca saja */}
+          {tab === "review" && (
+            <div className="mt-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-800 bg-gray-900 p-4">
+                <div>
+                  <h2 className="font-semibold">Monitoring Reservasi Token</h2>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Periksa bukti hasil AI dan setujui settlement setelah data token diverifikasi.
+                  </p>
+                </div>
+                <button
+                  onClick={load}
+                  className="rounded-lg bg-gray-700 px-3 py-2 text-xs hover:bg-gray-600"
+                >
+                  ↻ Muat Ulang
+                </button>
+              </div>
+
+              {reservationReviews.length === 0 ? (
+                <div className="rounded-xl border border-gray-800 bg-gray-900 p-8 text-center text-gray-400">
+                  ✅ Tidak ada reservasi yang memerlukan review.
+                </div>
+              ) : (
+                reservationReviews.map((r) => (
+                  <div
+                    key={r.reservation_id}
+                    className="space-y-3 rounded-xl border border-amber-700/40 bg-gray-900 p-4"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <p className="font-semibold text-white">
+                          {r.full_name || "Pengguna"}
+                        </p>
+                        <p className="text-sm text-gray-400">{r.email}</p>
+                      </div>
+                      <div className="flex flex-wrap gap-2 text-xs">
+                        <span className="rounded-lg bg-amber-900/50 px-2 py-1 text-amber-300">
+                          Reservasi: {r.reservation_status}
+                        </span>
+                        {r.result_status && (
+                          <span className="rounded-lg bg-blue-900/50 px-2 py-1 text-blue-300">
+                            Hasil: {r.result_status}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
+                      <div>
+                        <p className="text-xs text-gray-500">Cadangan Top Up</p>
+                        <p className="font-semibold">
+                          {r.reserved_topup.toLocaleString("id-ID")}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-500">Token Aktual</p>
+                        <p className="font-semibold">
+                          {r.actual_tokens.toLocaleString("id-ID")}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-500">Total Hasil AI</p>
+                        <p className="font-semibold text-amber-300">
+                          {r.total_tokens == null
+                            ? "Belum tersedia"
+                            : r.total_tokens.toLocaleString("id-ID")}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2 text-xs text-gray-400 md:grid-cols-2">
+                      <p className="break-all">
+                        ID reservasi: {r.reservation_id}
+                      </p>
+                      <p>Skill: {r.skill || "—"}</p>
+                      <p>
+                        Input: {r.prompt_tokens == null
+                          ? "—"
+                          : r.prompt_tokens.toLocaleString("id-ID")}
+                        {" · "}
+                        Output: {r.completion_tokens == null
+                          ? "—"
+                          : r.completion_tokens.toLocaleString("id-ID")}
+                      </p>
+                      <p>
+                        Dibuat: {r.created_at
+                          ? new Date(r.created_at).toLocaleString("id-ID")
+                          : "—"}
+                      </p>
+                    </div>
+
+                    {r.description && (
+                      <p className="break-words rounded-lg bg-gray-950 p-3 text-xs text-gray-400">
+                        Keterangan: {r.description}
+                      </p>
+                    )}
+
+                    {r.result_preview && (
+                      <details className="rounded-lg bg-gray-950 p-3">
+                        <summary className="cursor-pointer text-sm text-blue-300">
+                          Lihat ringkasan jawaban AI
+                        </summary>
+                        <p className="mt-3 whitespace-pre-wrap break-words text-sm text-gray-300">
+                          {r.result_preview}
+                        </p>
+                      </details>
+                    )}
+
+                    {["pending", "needs_review"].includes(r.reservation_status) &&
+                      ["received", "needs_review"].includes(r.result_status || "") &&
+                      r.prompt_tokens !== null &&
+                      r.completion_tokens !== null &&
+                      r.total_tokens !== null &&
+                      Number.isSafeInteger(r.prompt_tokens) &&
+                      Number.isSafeInteger(r.completion_tokens) &&
+                      Number.isSafeInteger(r.total_tokens) &&
+                      r.prompt_tokens >= 0 &&
+                      r.completion_tokens >= 0 &&
+                      r.total_tokens > 0 &&
+                      r.prompt_tokens <= 2147483647 &&
+                      r.completion_tokens <= 2147483647 &&
+                      r.total_tokens <= 2147483647 &&
+                      r.prompt_tokens + r.completion_tokens === r.total_tokens &&
+                      !!r.skill && (
+                        <div className="border-t border-gray-800 pt-3">
+                          <button
+                            onClick={() => settleReservation(r)}
+                            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-600"
+                          >
+                            ✓ Setujui Settlement
+                          </button>
+                          <p className="mt-2 text-xs text-gray-500">
+                            Memerlukan konfirmasi password Admin. Periksa bukti token sebelum menyetujui.
+                          </p>
+                        </div>
+                      )}
+                  </div>
+                ))
+              )}
             </div>
           )}
 
@@ -477,6 +1232,73 @@ export default function AdminPage() {
               </p>
             </div>
           )}
+        </div>
+      )}
+      {pendingAdminAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="admin-password-title"
+            className="w-full max-w-md rounded-2xl border border-gray-700 bg-gray-900 p-5 shadow-2xl"
+          >
+            <h2
+              id="admin-password-title"
+              className="text-lg font-semibold text-white"
+            >
+              Verifikasi Password Admin
+            </h2>
+
+            <p className="mt-2 text-sm text-gray-300">
+              {pendingAdminAction.title}
+            </p>
+
+            <p className="mt-2 text-xs text-gray-400">
+              Masukkan password akun admin yang sedang login untuk melanjutkan.
+            </p>
+
+            <form
+              className="mt-4 space-y-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                submitAdminPassword();
+              }}
+            >
+              <input
+                type="password"
+                autoComplete="current-password"
+                autoFocus
+                value={adminPassword}
+                onChange={(event) => setAdminPassword(event.target.value)}
+                placeholder="Password login admin"
+                disabled={adminActionBusy}
+                className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-3 text-sm text-white outline-none focus:border-blue-500"
+              />
+
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={adminActionBusy}
+                  onClick={() => {
+                    setPendingAdminAction(null);
+                    setAdminPassword("");
+                    setError(null);
+                  }}
+                  className="rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                >
+                  Batal
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={adminActionBusy || !adminPassword.trim()}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {adminActionBusy ? "Memproses..." : "Konfirmasi"}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </main>
