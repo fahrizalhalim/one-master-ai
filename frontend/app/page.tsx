@@ -16,10 +16,6 @@ const PACKAGE_DISPLAY: Record<string, { icon: string; name: string }> = {
   professional: { icon: "🏆", name: "Profesional" },
   business: { icon: "👑", name: "Bisnis" },
 
-  // Alias kode paket lama di database.
-  basic: { icon: "🎓", name: "Starter" },
-  pro: { icon: "⚡", name: "Reguler" },
-  premium: { icon: "🏆", name: "Profesional" },
 };
 
 function PackageStatus({ user }: { user: {

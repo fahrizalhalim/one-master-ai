@@ -212,16 +212,105 @@ def _extract_answer(response, api_type: str) -> str | None:
     return None
 
 
+
+def _execute_master_tool(name: str, arguments: str) -> str:
+    """Eksekusi hanya tool yang terdaftar; tidak menjalankan kode arbitrer."""
+    import json
+    from decimal import Decimal, InvalidOperation
+
+    if name != "kalkulator":
+        raise ValueError("Tool tidak diizinkan.")
+
+    try:
+        args = json.loads(arguments)
+    except (TypeError, ValueError):
+        raise ValueError("Argumen tool bukan JSON yang valid.")
+
+    if not isinstance(args, dict) or set(args) != {"a", "b", "operasi"}:
+        raise ValueError("Struktur argumen kalkulator tidak valid.")
+
+    a_raw, b_raw = args["a"], args["b"]
+    if isinstance(a_raw, bool) or isinstance(b_raw, bool):
+        raise ValueError("Operand harus berupa angka.")
+
+    try:
+        a = Decimal(str(a_raw))
+        b = Decimal(str(b_raw))
+    except (InvalidOperation, ValueError):
+        raise ValueError("Operand harus berupa angka yang valid.")
+
+    if not a.is_finite() or not b.is_finite():
+        raise ValueError("Operand harus berupa angka finite.")
+
+    if abs(a) > Decimal("1e12") or abs(b) > Decimal("1e12"):
+        raise ValueError("Nilai operand terlalu besar.")
+
+    operation = args["operasi"]
+
+    if operation == "tambah":
+        result = a + b
+    elif operation == "kurang":
+        result = a - b
+    elif operation == "kali":
+        result = a * b
+    elif operation == "bagi":
+        if b == 0:
+            raise ValueError("Tidak dapat membagi dengan nol.")
+        result = a / b
+    elif operation == "pangkat":
+        if b != b.to_integral_value() or abs(b) > 12:
+            raise ValueError("Pangkat harus bilangan bulat antara -12 dan 12.")
+        result = a ** int(b)
+    else:
+        raise ValueError("Operasi kalkulator tidak dikenal.")
+
+    if not result.is_finite():
+        raise ValueError("Hasil perhitungan tidak valid.")
+
+    return format(result.normalize(), "f")
+
+
 def _ask_legacy(prompt: str, provider_route: str = "manual") -> dict:
-    """Panggil provider lama Ai.sumopod dengan Responses lalu Chat Completions."""
+    """Panggil Responses API dengan Function Calling dan fallback lama."""
+
+    tools = [{
+        "type": "function",
+        "name": "kalkulator",
+        "description": (
+            "Menghitung operasi matematika dasar secara akurat: "
+            "tambah, kurang, kali, bagi, dan pangkat."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "a": {"type": "number"},
+                "b": {"type": "number"},
+                "operasi": {
+                    "type": "string",
+                    "enum": ["tambah", "kurang", "kali", "bagi", "pangkat"],
+                },
+            },
+            "required": ["a", "b", "operasi"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }]
+
+    def response_usage(response):
+        return _validated_usage(
+            getattr(response, "usage", None),
+            "input_tokens",
+            "output_tokens",
+        )
 
     try:
         response = client.responses.create(
             model=OPENAI_MODEL,
             input=prompt,
+            tools=tools,
+            tool_choice="auto",
             max_output_tokens=4096,
         )
-        api_type = "responses"
 
     except Exception as exc:
         status_code = getattr(exc, "status_code", None)
@@ -247,8 +336,6 @@ def _ask_legacy(prompt: str, provider_route: str = "manual") -> dict:
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=4096,
             )
-            api_type = "chat_completions"
-
         except Exception as fallback_exc:
             fallback_status = getattr(fallback_exc, "status_code", None)
             raise ProviderCallError(
@@ -257,47 +344,146 @@ def _ask_legacy(prompt: str, provider_route: str = "manual") -> dict:
                 reason=f"legacy_chat_error_{fallback_status or 'unknown'}",
             ) from fallback_exc
 
-    if api_type == "responses":
-        usage = _validated_usage(
-            getattr(response, "usage", None),
-            "input_tokens",
-            "output_tokens",
-        )
-    else:
         usage = _validated_usage(
             getattr(response, "usage", None),
             "prompt_tokens",
             "completion_tokens",
         )
+        answer = _extract_answer(response, "chat_completions")
 
-    answer = _extract_answer(response, api_type)
+        if answer is None:
+            raise ProviderCallError(
+                "Ai.sumopod memberikan respons tanpa jawaban yang dapat dibaca.",
+                safe_to_refund=False,
+                reason="legacy_chat_response_without_answer",
+            )
 
-    if answer is None:
-        raise ProviderCallError(
-            "Ai.sumopod memberikan respons tanpa jawaban yang dapat dibaca.",
-            safe_to_refund=False,
-            reason=f"legacy_{api_type}_response_without_answer",
-        )
+        if usage is None:
+            raise ProviderCallError(
+                "Jawaban diterima, tetapi data usage tidak valid.",
+                safe_to_refund=False,
+                reason="legacy_chat_usage_missing_or_invalid",
+                answer=answer,
+            )
 
-    if usage is None:
-        raise ProviderCallError(
-            "Jawaban Ai.sumopod diterima, tetapi data usage tidak valid.",
-            safe_to_refund=False,
-            reason=f"legacy_{api_type}_usage_missing_or_invalid",
-            answer=answer,
-        )
+        return {
+            "text": answer,
+            "prompt_tokens": usage[0],
+            "completion_tokens": usage[1],
+            "provider": "aisumopod",
+            "model": OPENAI_MODEL,
+            "provider_route": provider_route,
+        }
 
-    prompt_tokens, completion_tokens = usage
+    total_input = 0
+    total_output = 0
+    tool_calls_executed = 0
+    conversation_input = [{"role": "user", "content": prompt}]
 
-    return {
-        "text": answer,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "provider": "aisumopod",
-        "model": OPENAI_MODEL,
-        "provider_route": provider_route,
-    }
+    while True:
+        usage = response_usage(response)
 
+        if usage is None:
+            raise ProviderCallError(
+                "Data penggunaan token Responses API tidak valid.",
+                safe_to_refund=False,
+                reason="responses_usage_missing_or_invalid",
+                prompt_tokens=total_input,
+                completion_tokens=total_output,
+            )
+
+        total_input += usage[0]
+        total_output += usage[1]
+
+        output_items = getattr(response, "output", None) or []
+        calls = [
+            item for item in output_items
+            if getattr(item, "type", None) == "function_call"
+        ]
+
+        if not calls:
+            answer = _extract_answer(response, "responses")
+
+            if answer is None:
+                raise ProviderCallError(
+                    "DeepSeek memberikan respons tanpa jawaban yang dapat dibaca.",
+                    safe_to_refund=False,
+                    reason="responses_without_readable_answer",
+                    prompt_tokens=total_input,
+                    completion_tokens=total_output,
+                )
+
+            return {
+                "text": answer,
+                "prompt_tokens": total_input,
+                "completion_tokens": total_output,
+                "provider": "aisumopod",
+                "model": OPENAI_MODEL,
+                "provider_route": provider_route,
+            }
+
+        if tool_calls_executed + len(calls) > 5:
+            raise ProviderCallError(
+                "Batas lima pemanggilan tool dalam satu permintaan tercapai.",
+                safe_to_refund=False,
+                reason="function_call_limit_reached",
+                prompt_tokens=total_input,
+                completion_tokens=total_output,
+            )
+
+        try:
+            conversation_input.extend([
+                item.model_dump(exclude_none=True)
+                for item in output_items
+            ])
+
+            tool_outputs = []
+
+            for call in calls:
+                try:
+                    result = _execute_master_tool(
+                        call.name,
+                        call.arguments,
+                    )
+                    output_text = result
+                except Exception as tool_exc:
+                    output_text = f"Tool gagal: {str(tool_exc)[:200]}"
+
+                tool_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": call.call_id,
+                    "output": output_text,
+                })
+
+            tool_calls_executed += len(calls)
+            conversation_input.extend(tool_outputs)
+
+        except Exception as exc:
+            raise ProviderCallError(
+                "Gagal memproses hasil Function Calling.",
+                safe_to_refund=False,
+                reason="function_call_processing_error",
+                prompt_tokens=total_input,
+                completion_tokens=total_output,
+            ) from exc
+
+        try:
+            response = client.responses.create(
+                model=OPENAI_MODEL,
+                input=conversation_input,
+                tools=tools,
+                tool_choice="auto",
+                max_output_tokens=4096,
+            )
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None)
+            raise ProviderCallError(
+                "DeepSeek gagal melanjutkan siklus Function Calling.",
+                safe_to_refund=False,
+                reason=f"function_call_followup_error_{status_code or 'unknown'}",
+                prompt_tokens=total_input,
+                completion_tokens=total_output,
+            ) from exc
 
 def ask_ai(prompt: str, model_id: str = "default") -> dict:
     """Gunakan SumoPod sebagai default; Groq dipilih secara eksplisit."""

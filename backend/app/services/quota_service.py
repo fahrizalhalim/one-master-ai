@@ -13,14 +13,11 @@ from app.models.user import User
 
 WIT = ZoneInfo("Asia/Jayapura")
 
-# Batas harian paket, termasuk kode paket lama.
+# Batas harian berdasarkan kode paket resmi.
 DAILY_PACKAGE_LIMITS = {
     "starter": 50000,
-    "basic": 50000,
     "regular": 50000,
-    "pro": 50000,
     "professional": 150000,
-    "premium": 150000,
     "business": 150000,
 }
 
