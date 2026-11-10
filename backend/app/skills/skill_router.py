@@ -31,6 +31,8 @@ SKILLS = {
         "surat tugas", "undangan", "pengumuman ujian", "draft sk",
         "surat", "pengumuman", "seminar", "ujian proposal", "ujian skripsi",
         "penempatan ruang", "pengawas",
+        "panduan situs", "situs desa", "panduan website", "panduan layanan",
+        "cara pakai situs", "brosur cara pakai",
         "swot", "kpi", "strategi", "perencanaan strategis", "eksekutif",
     ],
     "business": [
