@@ -3,6 +3,7 @@ import hashlib
 import secrets
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import httpx
 from cryptography.fernet import Fernet
@@ -30,6 +31,7 @@ from app.models.token_reservation_result import TokenReservationResult
 from app.models.telegram_account import TelegramAccount
 from app.models.telegram_update import TelegramUpdate
 from app.models.user import User
+from app.api.routes_files import MAX_SIZE, _user_dir, extract_text
 from app.services.master_agent import (
     master_agent,
     prepare_master_prompt,
@@ -43,6 +45,171 @@ from app.services.token_service import (
 
 
 router = APIRouter(prefix="/api/v1/telegram", tags=["telegram"])
+
+# Ekstensi yang dapat diekstrak teksnya untuk dibaca AI.
+TEXT_EXTRACT_EXT = {".pdf", ".docx", ".txt", ".md"}
+# Ekstensi yang ditolak disimpan (mencegah penyalahgunaan).
+BLOCKED_EXT = {".exe", ".bat", ".cmd", ".sh", ".scr", ".dll", ".com", ".msi"}
+# Ekstensi default untuk media Telegram non-dokumen.
+_MEDIA_EXT = {
+    "photo": ".jpg",
+    "video": ".mp4",
+    "animation": ".gif",
+    "audio": ".mp3",
+    "voice": ".ogg",
+}
+
+
+def _extract_media(message: dict) -> dict | None:
+    """Normalisasi pesan media Telegram (document/photo/video/audio/voice/
+    animation) menjadi dict berisi file_id, file_name, file_size, ext."""
+    if not isinstance(message, dict):
+        return None
+
+    doc = message.get("document")
+    if isinstance(doc, dict) and doc.get("file_id"):
+        name = Path(str(doc.get("file_name") or "dokumen")).name[:120] or "dokumen"
+        return {
+            "file_id": doc.get("file_id"),
+            "file_name": name,
+            "file_size": doc.get("file_size"),
+            "ext": Path(name).suffix.lower(),
+        }
+
+    for key, ext in _MEDIA_EXT.items():
+        media = message.get(key)
+        if key == "photo":
+            media = (
+                max(media, key=lambda s: s.get("file_size") or 0)
+                if isinstance(media, list) and media
+                else None
+            )
+        if not isinstance(media, dict) or not media.get("file_id"):
+            continue
+        name = f"{key}_{str(media.get('file_id'))[:12]}{ext}"
+        return {
+            "file_id": media.get("file_id"),
+            "file_name": name,
+            "file_size": media.get("file_size"),
+            "ext": ext,
+        }
+
+    return None
+
+
+async def _download_telegram_document(
+    token: str,
+    document: dict,
+    user_id: str,
+) -> tuple[str, str, str, int]:
+    """Unduh dan simpan dokumen Telegram ke direktori milik user."""
+    telegram_file_id = document.get("file_id")
+    declared_size = document.get("file_size")
+    original_name = str(document.get("file_name") or "dokumen")[:120]
+    ext = str(document.get("ext") or Path(original_name).suffix.lower())
+
+    if not isinstance(telegram_file_id, str) or not telegram_file_id:
+        raise ValueError("Identitas dokumen Telegram tidak valid.")
+
+    if (
+        isinstance(declared_size, bool)
+        or not isinstance(declared_size, int)
+        or declared_size < 1
+        or declared_size > MAX_SIZE
+    ):
+        raise ValueError("Ukuran dokumen maksimal 5 MB.")
+
+    if ext in BLOCKED_EXT:
+        raise ValueError("Jenis file tidak diizinkan untuk disimpan.")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        meta_response = await client.post(
+            f"https://api.telegram.org/bot{token}/getFile",
+            json={"file_id": telegram_file_id},
+        )
+
+        if meta_response.status_code != 200:
+            raise ValueError("Telegram gagal menyiapkan dokumen.")
+
+        meta = meta_response.json()
+        file_path = (meta.get("result") or {}).get("file_path")
+
+        if (
+            not meta.get("ok")
+            or not isinstance(file_path, str)
+            or not file_path
+            or ".." in Path(file_path).parts
+            or Path(file_path).is_absolute()
+        ):
+            raise ValueError("Lokasi dokumen Telegram tidak valid.")
+
+        file_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+        chunks = []
+        total_size = 0
+
+        async with client.stream("GET", file_url) as response:
+            if response.status_code != 200:
+                raise ValueError("Gagal mengunduh dokumen dari Telegram.")
+
+            async for chunk in response.aiter_bytes():
+                total_size += len(chunk)
+                if total_size > MAX_SIZE:
+                    raise ValueError("Ukuran dokumen melebihi 5 MB.")
+                chunks.append(chunk)
+
+    if total_size == 0:
+        raise ValueError("Dokumen yang dikirim kosong.")
+
+    local_id = secrets.token_hex(6)
+    user_dir = _user_dir(user_id)
+    original_path = user_dir / f"{local_id}{ext}"
+    extract_path = user_dir / f"{local_id}.extract.txt"
+
+    try:
+        original_path.write_bytes(b"".join(chunks))
+        extracted = extract_text(original_path, ext) if ext in TEXT_EXTRACT_EXT else ""
+        extract_path.write_text(extracted, encoding="utf-8")
+        (user_dir / f"{local_id}.name.txt").write_text(
+            original_name, encoding="utf-8"
+        )
+    except Exception:
+        original_path.unlink(missing_ok=True)
+        extract_path.unlink(missing_ok=True)
+        (user_dir / f"{local_id}.name.txt").unlink(missing_ok=True)
+        raise ValueError("File rusak atau tidak dapat dibaca.")
+
+    return local_id, original_name, extracted, total_size
+
+
+async def _send_telegram_document_checked(
+    token: str,
+    chat_id: int,
+    path: Path,
+    original_name: str,
+) -> bool:
+    """Kirim file asli melalui Telegram dan periksa hasilnya."""
+    try:
+        with path.open("rb") as file_handle:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendDocument",
+                    data={"chat_id": str(chat_id)},
+                    files={
+                        "document": (
+                            Path(original_name).name[:120],
+                            file_handle,
+                            "application/octet-stream",
+                        )
+                    },
+                )
+
+        if response.status_code != 200:
+            return False
+
+        return bool(response.json().get("ok"))
+
+    except (httpx.RequestError, OSError, ValueError):
+        return False
 
 
 class ConnectBotRequest(BaseModel):
@@ -744,15 +911,19 @@ async def telegram_webhook(
 
     now = datetime.utcnow()
 
-    if not private_chat or not isinstance(text, str):
+    media = _extract_media(message)
+    caption = message.get("caption")
+    caption_text = caption.strip() if isinstance(caption, str) else ""
+
+    if not private_chat or (not isinstance(text, str) and media is None):
         update.status = "completed"
         update.completed_at = now
-        update.error_code = "ignored_non_private_or_non_text"
+        update.error_code = "ignored_non_private_or_unsupported_message"
         db.commit()
         return {"ok": True, "ignored": True}
 
-    parts = text.strip().split(maxsplit=1)
-    command = parts[0].split("@", 1)[0] if parts else ""
+    parts = text.strip().split(maxsplit=1) if isinstance(text, str) else caption_text.split(maxsplit=1)
+    command = parts[0].split("@", 1)[0].lower() if parts else ""
 
     # Proses linking /start tetap dipisahkan dari chat AI.
     if command == "/start":
@@ -841,7 +1012,227 @@ async def telegram_webhook(
         )
         return {"ok": True, "error": "user_inactive"}
 
-    user_message = text.strip()
+    # Perintah pengelolaan file tidak menggunakan AI atau token.
+    if command == "/files":
+        user_dir = _user_dir(user.id)
+        entries = []
+
+        for path in sorted(user_dir.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
+            if not path.is_file():
+                continue
+            if not path.stem.isalnum():
+                continue
+
+            name_path = user_dir / f"{path.stem}.name.txt"
+            original_name = (
+                name_path.read_text(encoding="utf-8", errors="ignore").strip()
+                if name_path.is_file()
+                else path.name
+            )
+            entries.append(
+                f"ID: {path.stem}\nNama: {original_name[:120]}\nUkuran: {path.stat().st_size} byte"
+            )
+
+        if entries:
+            reply = "FILE ANDA (maksimal 20 terbaru):\n\n" + "\n\n".join(entries[:20])
+            reply += "\n\nUnduh: /download ID_FILE · Hapus: /delete ID_FILE · Perbarui: kirim file + caption /update ID_FILE"
+        else:
+            reply = "Belum ada file tersimpan. Kirim file apa pun (PDF, DOCX, TXT, gambar, video, audio, ZIP, dll.) maksimal 5 MB ke bot."
+
+        token = decrypt_bot_token(account)
+        sent = await _send_telegram_message_checked(token, chat_id, reply)
+        update.status = "completed" if sent else "failed"
+        update.error_code = None if sent else "telegram_send_failed"
+        update.completed_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True, "command": "files", "sent": sent}
+
+    if command == "/download":
+        file_id = parts[1].strip().lower() if len(parts) == 2 else ""
+
+        if len(file_id) != 12 or any(c not in "0123456789abcdef" for c in file_id.lower()):
+            reply = "Format perintah: /download ID_FILE\nGunakan /files untuk melihat ID."
+            token = decrypt_bot_token(account)
+            sent = await _send_telegram_message_checked(token, chat_id, reply)
+            update.status = "completed" if sent else "failed"
+            update.error_code = None if sent else "telegram_send_failed"
+            update.completed_at = datetime.utcnow()
+            db.commit()
+            return {"ok": True, "command": "download", "sent": sent}
+
+        user_dir = _user_dir(user.id)
+        matches = [
+            p
+            for p in user_dir.glob(f"{file_id}.*")
+            if p.is_file()
+            and not p.name.endswith(".name.txt")
+            and not p.name.endswith(".extract.txt")
+        ]
+
+        if len(matches) != 1:
+            token = decrypt_bot_token(account)
+            sent = await _send_telegram_message_checked(
+                token, chat_id, "File tidak ditemukan di akun Anda."
+            )
+            update.status = "completed" if sent else "failed"
+            update.error_code = None if sent else "telegram_send_failed"
+            update.completed_at = datetime.utcnow()
+            db.commit()
+            return {"ok": True, "command": "download", "sent": sent}
+
+        path = matches[0]
+        if path.stat().st_size > MAX_SIZE:
+            reply = "File melebihi batas pengiriman 5 MB."
+            token = decrypt_bot_token(account)
+            sent = await _send_telegram_message_checked(token, chat_id, reply)
+        else:
+            name_path = user_dir / f"{file_id}.name.txt"
+            original_name = (
+                name_path.read_text(encoding="utf-8", errors="ignore").strip()
+                if name_path.is_file()
+                else path.name
+            )
+            token = decrypt_bot_token(account)
+            sent = await _send_telegram_document_checked(
+                token, chat_id, path, original_name
+            )
+
+        update.status = "completed" if sent else "failed"
+        update.error_code = None if sent else "telegram_send_failed"
+        update.completed_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True, "command": "download", "sent": sent}
+
+    if command == "/delete":
+        file_id = parts[1].strip().lower() if len(parts) == 2 else ""
+
+        if len(file_id) != 12 or any(c not in "0123456789abcdef" for c in file_id.lower()):
+            reply = "Format perintah: /delete ID_FILE\nGunakan /files untuk melihat ID."
+            token = decrypt_bot_token(account)
+            sent = await _send_telegram_message_checked(token, chat_id, reply)
+            update.status = "completed" if sent else "failed"
+            update.error_code = None if sent else "telegram_send_failed"
+            update.completed_at = datetime.utcnow()
+            db.commit()
+            return {"ok": True, "command": "delete", "sent": sent}
+
+        user_dir = _user_dir(user.id)
+        targets = [p for p in user_dir.glob(f"{file_id}.*") if p.is_file()]
+        for p in targets:
+            p.unlink(missing_ok=True)
+
+        reply = "File berhasil dihapus." if targets else "File tidak ditemukan di akun Anda."
+        token = decrypt_bot_token(account)
+        sent = await _send_telegram_message_checked(token, chat_id, reply)
+        update.status = "completed" if sent else "failed"
+        update.error_code = None if sent else "telegram_send_failed"
+        update.completed_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True, "command": "delete", "sent": sent}
+
+    if command == "/update":
+        if media is None:
+            reply = "Kirim file baru dengan caption /update ID_FILE.\nGunakan /files untuk melihat ID."
+            token = decrypt_bot_token(account)
+            sent = await _send_telegram_message_checked(token, chat_id, reply)
+            update.status = "completed" if sent else "failed"
+            update.error_code = None if sent else "telegram_send_failed"
+            update.completed_at = datetime.utcnow()
+            db.commit()
+            return {"ok": True, "command": "update", "sent": sent}
+
+        file_id = parts[1].strip().lower() if len(parts) == 2 else ""
+        if len(file_id) != 12 or any(c not in "0123456789abcdef" for c in file_id.lower()):
+            reply = "Format perintah: /update ID_FILE\nKirim file baru dengan caption /update ID_FILE."
+            token = decrypt_bot_token(account)
+            sent = await _send_telegram_message_checked(token, chat_id, reply)
+            update.status = "completed" if sent else "failed"
+            update.error_code = None if sent else "telegram_send_failed"
+            update.completed_at = datetime.utcnow()
+            db.commit()
+            return {"ok": True, "command": "update", "sent": sent}
+
+        token = decrypt_bot_token(account)
+        try:
+            new_id, original_name, _, file_size = await _download_telegram_document(
+                token=token,
+                document=media,
+                user_id=user.id,
+            )
+        except (ValueError, httpx.RequestError):
+            update.status = "failed"
+            update.error_code = "telegram_document_download_failed"
+            update.completed_at = datetime.utcnow()
+            db.commit()
+            await _send_telegram_message_checked(
+                token,
+                chat_id,
+                "File gagal diproses. Pastikan ukurannya maksimal 5 MB.",
+            )
+            return {"ok": True, "status": "update_failed"}
+
+        user_dir = _user_dir(user.id)
+        for p in list(user_dir.glob(f"{file_id}.*")):
+            p.unlink(missing_ok=True)
+
+        renamed = 0
+        for p in list(user_dir.glob(f"{new_id}.*")):
+            suffix = p.name[len(new_id):]
+            p.rename(user_dir / f"{file_id}{suffix}")
+            renamed += 1
+
+        reply = (
+            f"File {file_id} berhasil diperbarui ({original_name}, {file_size} byte)."
+            if renamed
+            else "Gagal memperbarui file."
+        )
+        sent = await _send_telegram_message_checked(token, chat_id, reply)
+        update.status = "completed" if sent else "failed"
+        update.error_code = None if sent else "telegram_send_failed"
+        update.completed_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True, "command": "update", "sent": sent}
+
+    file_text = ""
+
+    if media is not None:
+        token = decrypt_bot_token(account)
+
+        try:
+            file_id, original_name, extracted_text, file_size = (
+                await _download_telegram_document(
+                    token=token,
+                    document=media,
+                    user_id=user.id,
+                )
+            )
+        except (ValueError, httpx.RequestError):
+            update.status = "failed"
+            update.error_code = "telegram_document_download_failed"
+            update.completed_at = datetime.utcnow()
+            db.commit()
+            await _send_telegram_message_checked(
+                token,
+                chat_id,
+                "File gagal diproses. Pastikan ukurannya maksimal 5 MB.",
+            )
+            return {"ok": True, "status": "document_failed"}
+
+        caption = message.get("caption")
+        user_message = (
+            caption.strip()
+            if isinstance(caption, str) and caption.strip()
+            else "Mohon analisis dokumen yang saya kirimkan."
+        )
+        user_message += (
+            f"\n\n[Dokumen terlampir: {original_name}; "
+            f"ID file: {file_id}; ukuran: {file_size} byte]"
+        )
+        file_text = extracted_text[:6000]
+
+    else:
+        user_message = text.strip()
+
     if not user_message:
         update.status = "completed"
         update.completed_at = now
@@ -885,7 +1276,7 @@ async def telegram_webhook(
         profession=user.profession or "umum",
         full_name=user.full_name or "",
         history_text=history_text,
-        file_text="",
+        file_text=file_text,
     )
 
     estimated_tokens = max(
@@ -932,9 +1323,9 @@ async def telegram_webhook(
             user_message=user_message,
             profession=user.profession or "umum",
             history_text=history_text,
-            file_text="",
+            file_text=file_text,
             prepared=prepared,
-            model_id="groq-gpt-oss-120b",
+            model_id="default",
         )
 
     except ProviderCallError as exc:
