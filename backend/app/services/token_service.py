@@ -106,6 +106,11 @@ def reserve_tokens(
         if locked_user.status != "active" or not locked_user.is_active:
             raise HTTPException(status_code=403, detail="Akun belum aktif.")
 
+        # Kunci wallet terlebih dahulu agar pemeriksaan saldo dan kuota
+        # dilakukan terhadap saldo yang sama selama reservasi.
+        wallet = _get_wallet(db, locked_user.id)
+        topup_available = int(wallet.topup_balance)
+
         daily_limit, daily_used = daily_token_usage(db, locked_user)
 
         if daily_limit is None:
@@ -115,9 +120,6 @@ def reserve_tokens(
 
         reserved_daily = min(estimated_tokens, daily_remaining)
         reserved_topup = estimated_tokens - reserved_daily
-
-        wallet = _get_wallet(db, locked_user.id)
-        topup_available = int(wallet.topup_balance)
 
         if reserved_topup > 0 and topup_available < reserved_topup:
             shortage = reserved_topup - max(0, topup_available)

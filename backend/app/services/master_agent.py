@@ -299,10 +299,10 @@ def _ask_legacy(prompt: str, provider_route: str = "manual") -> dict:
     }
 
 
-def ask_ai(prompt: str, model_id: str = "groq-gpt-oss-120b") -> dict:
-    """Prioritaskan Groq; gunakan Ai.sumopod hanya jika penolakan Groq pasti."""
+def ask_ai(prompt: str, model_id: str = "default") -> dict:
+    """Gunakan SumoPod sebagai default; Groq dipilih secara eksplisit."""
 
-    # Pilihan manual Ai.sumopod tidak menjalankan Groq.
+    # OM.AI Pro menggunakan provider SumoPod.
     if model_id == "default":
         return _ask_legacy(prompt, provider_route="manual")
 
@@ -379,6 +379,19 @@ Aturan umum:
 - Jika data tidak tersedia, jelaskan data apa yang masih dibutuhkan.
 - Gunakan bahasa Indonesia.
 
+Aturan memahami percakapan dan konteks:
+- Baca riwayat percakapan untuk memahami maksud pesan terbaru, bukan sekadar mengulang atau merangkum riwayat.
+- Pesan terbaru pengguna adalah permintaan utama. Riwayat hanya menjadi konteks pendukung jika memang relevan.
+- Kenali jawaban singkat seperti nama benda, pilihan, angka, ukuran, atau satuan sebagai kemungkinan jawaban atas pertanyaan asisten sebelumnya.
+- Cocokkan jawaban singkat dengan pertanyaan sebelumnya yang paling relevan, bukan otomatis menganggapnya sebagai topik baru.
+- Perhatikan variasi ejaan, salah ketik, singkatan, dan istilah yang maknanya sama jika konteks mendukungnya. Contohnya, "polibag" dan "polybag" merujuk pada benda yang sama.
+- Jika asisten sebelumnya mengajukan beberapa pertanyaan, tentukan pertanyaan mana yang dijawab oleh pesan terbaru. Jangan menganggap pertanyaan lainnya sudah terjawab.
+- Gunakan hanya informasi yang benar-benar diberikan pengguna. Jangan mengarang jawaban untuk pertanyaan yang belum terjawab.
+- Jika masih ada informasi penting yang belum diberikan, tanyakan bagian yang belum terjawab secara jelas dan seperlunya.
+- Jika pesan terbaru jelas membahas topik yang berbeda, jawab topik baru tersebut tanpa membawa konteks lama yang tidak relevan.
+- Jika pengguna kembali membahas topik lama, gunakan riwayat lama yang relevan apabila tersedia.
+- Jika hubungan pesan terbaru dengan riwayat tidak cukup jelas, minta klarifikasi daripada memaksakan hubungan.
+
 Permintaan pengguna:
 {user_message}"""
 
@@ -391,7 +404,7 @@ def master_agent(
     history_text: str = "",
     file_text: str = "",
     prepared: dict | None = None,
-    model_id: str = "groq-gpt-oss-120b",
+    model_id: str = "default",
 ) -> dict:
     """Jalankan Master Agent menggunakan prompt dan model terpilih."""
     prepared = prepared or prepare_master_prompt(

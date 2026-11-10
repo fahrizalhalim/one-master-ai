@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/app/auth-context";
-import DownloadButtons from "@/app/download-buttons";
 import UploadButton, { type AttachedFile } from "@/app/upload-button";
 import { useConversations } from "@/app/use-conversations";
 
@@ -74,10 +73,10 @@ export default function Home() {
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [modelId, setModelId] = useState("groq-gpt-oss-120b");
+  const [modelId, setModelId] = useState("default");
   const [modelOptions, setModelOptions] = useState<{ id: string; label: string }[]>([
-    { id: "groq-gpt-oss-120b", label: "Groq · GPT-OSS 120B" },
-    { id: "default", label: "Ai.sumopod (manual/cadangan)" },
+    { id: "default", label: "OM.AI Pro" },
+    { id: "groq-gpt-oss-120b", label: "Groq · GPT-OSS 120B (Free)" },
   ]);
   const [busy, setBusy] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -91,6 +90,24 @@ export default function Home() {
     topup_balance: number | null;
   } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLInputElement>(null);
+
+  // Pastikan sidebar tertutup setelah login atau pergantian akun.
+  useEffect(() => {
+    setSidebarOpen(false);
+    setSidebarCollapsed(true);
+  }, [token]);
+
+
+  // Jangan tampilkan pesan dari akun sebelumnya saat sesi berubah.
+  useEffect(() => {
+    setMessages([]);
+    setInput("");
+    setAttached(null);
+    setQuota(null);
+    setBusy(false);
+  }, [token]);
+
 
   // Muat statistik pemakaian dan saldo token
   const loadQuota = useCallback(async () => {
@@ -123,9 +140,7 @@ export default function Home() {
         const data = await res.json();
         if (active && Array.isArray(data.models) && data.models.length > 0) {
           setModelOptions(data.models);
-          if (!data.models.some((m: { id: string }) => m.id === modelId)) {
-            setModelId("default");
-          }
+          setModelId("default");
         }
       })
       .catch(() => {
@@ -135,7 +150,7 @@ export default function Home() {
     return () => {
       active = false;
     };
-  }, [token, modelId]);
+  }, [token]);
 
   // Guard: belum login -> ke /login
   useEffect(() => {
@@ -161,10 +176,21 @@ export default function Home() {
     }
   }
 
+  function closeSidebar() {
+    setSidebarOpen(false);
+    setSidebarCollapsed(true);
+  }
+
   function startNew() {
     newConversation();
     setMessages([]);
-    setSidebarOpen(false);
+    setInput("");
+    setAttached(null);
+    closeSidebar();
+
+    requestAnimationFrame(() => {
+      chatInputRef.current?.focus();
+    });
   }
 
   async function removeConversation(id: string) {
@@ -209,31 +235,46 @@ export default function Home() {
       refresh();
       loadQuota();
     } catch (err) {
+      const errorMessage =
+        err instanceof Error ? err.message : "tidak diketahui";
+
+      const tokenExhausted =
+        /kuota paket harian tidak mencukupi|saldo top.?up tidak cukup|saldo top.?up tidak mencukupi|token tidak mencukupi/i.test(errorMessage);
+
+      if (user?.role !== "admin" && tokenExhausted) {
+        router.push("/topup");
+        return;
+      }
+
       setMessages((m) => [
         ...m,
         {
           role: "assistant",
-          content: `⚠️ Terjadi kesalahan: ${err instanceof Error ? err.message : "tidak diketahui"}.`,
+          content: `❤️ Mohon maaf : ${errorMessage}.`,
         },
       ]);
     } finally {
       setBusy(false);
+
+      requestAnimationFrame(() => {
+        chatInputRef.current?.focus();
+      });
     }
   }
 
   if (loading || !token || !user) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-gray-950 text-gray-400">
+      <main className="flex min-h-screen items-center justify-center bg-black text-gray-400">
         Memuat…
       </main>
     );
   }
 
   return (
-    <main className="flex h-[100dvh] min-h-0 overflow-hidden overscroll-none bg-gray-950 text-gray-100">
+    <main className="flex h-[100dvh] min-h-0 overflow-hidden overscroll-none bg-black text-gray-100">
       {/* Sidebar riwayat */}
       <aside
-        className={`fixed inset-y-0 left-0 z-20 w-72 shrink-0 transform border-r border-gray-800 bg-gray-900 transition-all duration-300 md:static md:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-20 w-72 shrink-0 transform border-r border-gray-800 bg-black transition-all duration-300 md:static md:translate-x-0 ${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         } ${sidebarCollapsed ? "md:-ml-72" : "md:ml-0"}`}
       >
@@ -251,9 +292,9 @@ export default function Home() {
             </div>
             <button
               onClick={startNew}
-              className="w-full rounded-xl bg-blue-600 py-2.5 text-sm font-semibold hover:bg-blue-500"
+              className="w-full rounded-xl border border-neutral-700 bg-transparent py-2.5 text-sm font-semibold text-white transition hover:border-neutral-500 hover:bg-neutral-800 hover:text-white"
             >
-              ＋ Percakapan Baru
+              ＋ New Chat
             </button>
           </div>
           <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain p-2">
@@ -302,7 +343,7 @@ export default function Home() {
             </div>
 
             {quota && (
-              <div className="mb-3 rounded-xl border border-gray-800 bg-gray-950/60 p-3">
+              <div className="mb-3 rounded-xl border border-gray-800 bg-black/60 p-3">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-xs font-semibold text-gray-300">Kuota AI</p>
                   {quota.unlimited ? (
@@ -394,13 +435,6 @@ export default function Home() {
             ☰
           </button>
 
-          <div className="flex min-w-0 flex-1 items-center justify-center gap-2 px-2">
-            <img src="/logo-gamalama.png" alt="Logo ONE MASTER AI" className="h-7 w-7 shrink-0 rounded-full object-cover" />
-            <span className="truncate text-sm font-bold tracking-wide text-gray-100">
-              ONE MASTER AI
-            </span>
-          </div>
-
           <button
             onClick={() => setSidebarOpen(true)}
             aria-label="Buka profil dan pengaturan"
@@ -408,6 +442,10 @@ export default function Home() {
           >
             {(user.full_name || user.email).charAt(0).toUpperCase()}
           </button>
+
+          <div className="ml-auto flex min-w-0 items-center justify-end pl-2">
+            <img src="/qris/AIku.jpg" alt="Logo ONE MASTER AI" className="h-7 w-auto max-w-[112px] shrink-0 object-contain" />
+          </div>
         </header>
 
                 <header className="hidden shrink-0 border-b border-gray-800 px-5 py-3 md:block">
@@ -420,15 +458,18 @@ export default function Home() {
             >
               ☰
             </button>
-            <img src="/logo-gamalama.png" alt="Logo ONE MASTER AI" className="h-8 w-8 rounded-full object-cover" />
-            <h1 className="text-base font-bold tracking-wide text-gray-100">
-              ONE MASTER AI
-            </h1>
+            <span className="min-w-0 truncate text-sm font-medium text-gray-300">
+              {user.full_name || user.email}
+            </span>
+            <img src="/qris/AIku.jpg" alt="Logo ONE MASTER AI" className="ml-auto h-8 w-auto max-w-[128px] object-contain" />
           </div>
         </header>
 
         {/* Chat area */}
-        <div className="min-h-0 flex-1 space-y-4 overflow-x-hidden overflow-y-auto overscroll-contain px-3 py-4 sm:px-6 sm:py-6">
+        <div
+          onClick={closeSidebar}
+          className="min-h-0 flex-1 space-y-4 overflow-x-hidden overflow-y-auto overscroll-contain px-3 py-4 sm:px-6 sm:py-6"
+        >
           {messages.length === 0 && (
             <div className="mx-auto mt-16 max-w-md px-2 text-center text-gray-500 sm:mt-24">
               <p className="text-4xl">💬</p>
@@ -450,14 +491,9 @@ export default function Home() {
                     : "bg-gray-800 text-gray-100"
                 }`}
               >
-                {m.skill && (
-                  <span className="mb-2 inline-block rounded-full bg-emerald-600/30 px-2 py-0.5 text-xs text-emerald-300">
-                    skill: {m.skill}
-                  </span>
-                )}
                 <p>{m.content}</p>
 
-                {m.role === "assistant" && m.content.startsWith("⚠️") && (
+                {m.role === "assistant" && m.content.startsWith("❤️") && (
                   <div className="mt-4 rounded-xl border border-amber-700/50 bg-gray-900 p-3">
                     <p className="mb-2 font-semibold text-amber-300">
                       Silakan hubungi Admin ONE MASTER AI
@@ -490,13 +526,6 @@ export default function Home() {
                   </div>
                 )}
 
-                {m.role === "assistant" && !m.content.startsWith("⚠️") && (
-                  <DownloadButtons
-                    token={token}
-                    title={messages[0]?.role === "user" ? messages[0].content.slice(0, 60) : "Dokumen ONE MASTER AI"}
-                    content={m.content}
-                  />
-                )}
               </div>
             </div>
           ))}
@@ -513,6 +542,8 @@ export default function Home() {
         {/* Input */}
         <div className="shrink-0 border-t border-gray-800 px-3 py-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] sm:px-6 sm:py-4">
           <input
+            ref={chatInputRef}
+            onFocus={closeSidebar}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && send()}
@@ -539,10 +570,10 @@ export default function Home() {
                 width: `${Math.max(8, ...modelOptions.map((model) => model.label.length)) + 4}ch`,
                 maxWidth: "calc(100vw - 150px)",
               }}
-              className="min-w-0 shrink rounded-lg border border-gray-800 bg-gray-900 px-2 py-2 text-xs outline-none transition focus:border-blue-500 sm:text-sm"
+              className="h-[42px] min-w-0 shrink rounded-lg border border-neutral-700 bg-transparent px-2 py-0 text-xs text-white outline-none transition focus:border-neutral-400 sm:text-sm"
             >
               {modelOptions.map((model) => (
-                <option key={model.id} value={model.id}>{model.label}</option>
+                <option key={model.id} value={model.id} className="bg-white text-black">{model.label}</option>
               ))}
             </select>
 
@@ -551,7 +582,11 @@ export default function Home() {
             <button
               onClick={send}
               disabled={busy || (!input.trim() && !attached)}
-              className="shrink-0 rounded-xl bg-blue-600 px-4 py-3 text-sm font-medium transition hover:bg-blue-500 disabled:opacity-40 sm:px-6 sm:text-base"
+              className={`h-[42px] shrink-0 rounded-xl border px-4 py-0 text-sm font-medium transition disabled:opacity-40 sm:px-6 sm:text-base ${
+                input.trim() || attached
+                  ? "border-blue-500 bg-blue-600 text-white hover:bg-blue-500"
+                  : "border-neutral-700 bg-transparent text-white hover:bg-neutral-800"
+              }`}
             >
               Kirim
             </button>

@@ -90,6 +90,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  // Sinkronkan perubahan login/logout dari tab browser lain.
+  useEffect(() => {
+    function syncSession(event: StorageEvent) {
+      if (
+        event.key !== "oma_token" &&
+        event.key !== "oma_user" &&
+        event.key !== null
+      ) return;
+
+      const storedToken = localStorage.getItem("oma_token");
+      const storedUser = localStorage.getItem("oma_user");
+
+      setToken(storedToken);
+
+      if (!storedToken || !storedUser) {
+        setUser(null);
+        return;
+      }
+
+      try {
+        setUser(JSON.parse(storedUser));
+      } catch {
+        setUser(null);
+      }
+    }
+
+    window.addEventListener("storage", syncSession);
+    return () => window.removeEventListener("storage", syncSession);
+  }, []);
+
   const persist = useCallback((newToken: string, newUser: User) => {
     setToken(newToken);
     setUser(newUser);

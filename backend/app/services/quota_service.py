@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.subscription import SubscriptionPlan, UserSubscription
+from app.models.subscription import SubscriptionPlan, UserSubscription, TokenWallet
 from app.models.token_reservation import TokenReservation
 from app.models.token_usage import TokenUsage
 from app.models.user import User
@@ -45,6 +45,15 @@ def effective_daily_token_limit(db: Session, user: User) -> int | None:
 
     if user.role == "admin":
         return None
+
+    # Kuota paket hanya aktif jika saldo Top Up masih positif.
+    topup_balance = (
+        db.query(TokenWallet.topup_balance)
+        .filter(TokenWallet.user_id == user.id)
+        .scalar()
+    )
+    if topup_balance is None or int(topup_balance) <= 0:
+        return 0
 
     # Kolom periode langganan disimpan sebagai WIT-naive oleh wit_now().
     # Karena itu, pembandingnya juga harus WIT-naive.

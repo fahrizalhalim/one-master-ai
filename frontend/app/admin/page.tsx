@@ -536,7 +536,7 @@ export default function AdminPage() {
 
   if (loading || !token || !user) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-gray-950 text-gray-400">
+      <main className="flex min-h-screen items-center justify-center bg-black text-gray-400">
         Memuat…
       </main>
     );
@@ -545,7 +545,7 @@ export default function AdminPage() {
   const isAdmin = user.role === "admin";
 
   return (
-    <main className="min-h-screen bg-gray-950 text-gray-100">
+    <main className="min-h-screen bg-black text-gray-100">
       {/* Header */}
       <header className="flex items-center justify-between gap-2 border-b border-gray-800 px-3 py-3 sm:px-6 sm:py-4">
         <h1 className="text-base font-bold sm:text-xl">👑 Panel SuperAdmin</h1>
@@ -1162,13 +1162,13 @@ export default function AdminPage() {
                     </div>
 
                     {r.description && (
-                      <p className="break-words rounded-lg bg-gray-950 p-3 text-xs text-gray-400">
+                      <p className="break-words rounded-lg bg-black p-3 text-xs text-gray-400">
                         Keterangan: {r.description}
                       </p>
                     )}
 
                     {r.result_preview && (
-                      <details className="rounded-lg bg-gray-950 p-3">
+                      <details className="rounded-lg bg-black p-3">
                         <summary className="cursor-pointer text-sm text-blue-300">
                           Lihat ringkasan jawaban AI
                         </summary>
@@ -1272,7 +1272,7 @@ export default function AdminPage() {
                 onChange={(event) => setAdminPassword(event.target.value)}
                 placeholder="Password login admin"
                 disabled={adminActionBusy}
-                className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-3 text-sm text-white outline-none focus:border-blue-500"
+                className="w-full rounded-lg border border-gray-700 bg-black px-3 py-3 text-sm text-white outline-none focus:border-blue-500"
               />
 
               <div className="flex justify-end gap-2">

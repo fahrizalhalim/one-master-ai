@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import get_current_user
 from app.models.database import get_db
 from app.models.user import User
-from app.models.subscription import SubscriptionPlan, UserSubscription
+from app.models.subscription import SubscriptionPlan, UserSubscription, TokenWallet
 from app.services.token_service import wit_now
 from app.services.auth_service import (
     create_access_token,
@@ -134,9 +134,24 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
         organization=data.organization,
         status="pending",  # menunggu persetujuan admin
     )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+    try:
+        # Buat wallet dengan saldo Top Up awal 0 untuk setiap pendaftar baru.
+        db.add(user)
+        db.flush()
+
+        db.add(
+            TokenWallet(
+                user_id=user.id,
+                topup_balance=0,
+            )
+        )
+
+        # Akun dan wallet disimpan dalam satu transaksi.
+        db.commit()
+        db.refresh(user)
+    except Exception:
+        db.rollback()
+        raise
 
     # Token tetap diterbitkan agar user bisa cek status via /auth/me,
     # TAPI chat diblokir selama status != active.

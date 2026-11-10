@@ -1,6 +1,7 @@
 """Chat dengan penyimpanan riwayat percakapan per user."""
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -32,21 +33,20 @@ router = APIRouter(prefix="/api/v1", tags=["chat"])
 logger = logging.getLogger(__name__)
 
 # Jumlah pesan terakhir yang dikirim sebagai konteks ke AI
-HISTORY_LIMIT = 10
+HISTORY_LIMIT = 30
 
 @router.get("/models")
 def available_models(current_user: User = Depends(get_current_user)):
     """Daftar model yang sudah dikonfigurasi di server."""
-    models = []
+    models = [{
+        "id": "default",
+        "label": "OM.AI Pro",
+    }]
     if GROQ_API_KEY:
         models.append({
             "id": "groq-gpt-oss-120b",
-            "label": "Groq · GPT-OSS 120B (utama)",
+            "label": "Groq · GPT-OSS 120B (Free)",
         })
-    models.append({
-        "id": "default",
-        "label": "Ai.sumopod (manual/cadangan)",
-    })
     return {"models": models}
 
 
@@ -92,7 +92,7 @@ def my_quota(
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
-    model_id: Literal["default", "groq-gpt-oss-120b"] = "groq-gpt-oss-120b"
+    model_id: Literal["default", "groq-gpt-oss-120b"] = "default"
     conversation_id: str | None = Field(
         default=None, description="ID percakapan (kosong = mulai baru)"
     )
@@ -124,6 +124,179 @@ def _save_message(db: Session, conversation_id: str, role: str, content: str, sk
             content=content,
             skill=skill,
         )
+    )
+
+
+
+
+def _select_relevant_history(history: list, user_message: str) -> str:
+    """Pilih riwayat berdasarkan jawaban singkat, topik, atau lanjutan."""
+
+    if not history:
+        return ""
+
+    def normalize(value):
+        value = (value or "").lower().strip()
+        value = re.sub(r"\bpolibag\b|\bpoli\s*bag\b", "polybag", value)
+        return value
+
+    stopwords = {
+        "yang", "dan", "atau", "untuk", "dari", "dengan",
+        "pada", "adalah", "ini", "itu", "saya", "aku",
+        "anda", "kamu", "tolong", "mohon", "bisa", "buat",
+        "bagaimana", "apakah", "jelaskan", "berikan",
+        "sebuah", "dalam", "agar", "juga", "lebih",
+        "sekarang", "maka", "akan", "dapat", "sudah",
+        "belum", "tentang", "pembahasan",
+    }
+
+    def words(value):
+        return {
+            word for word in re.findall(r"[a-z0-9_]{3,}", normalize(value))
+            if word not in stopwords
+        }
+
+    current = normalize(user_message)
+    current_words = words(current)
+
+    # Kelompokkan riwayat menjadi satu rangkaian user dan jawaban asisten.
+    turns = []
+    i = 0
+
+    while i < len(history):
+        if history[i].role != "user":
+            i += 1
+            continue
+
+        end = i + 1
+        while end < len(history) and history[end].role != "user":
+            end += 1
+
+        turns.append(history[i:end])
+        i = end
+
+    if not turns:
+        return ""
+
+    selected_turns = []
+
+    # 1. Jawaban singkat berupa pilihan media/wadah tanam.
+    media_answers = {
+        "polybag", "pot", "tanah", "hidroponik",
+        "lahan", "bedengan", "karung", "ember",
+    }
+
+    if current in media_answers:
+        for turn in reversed(turns):
+            assistant_text = " ".join(
+                normalize(m.content)
+                for m in turn if m.role != "user"
+            )
+            if any(answer in words(assistant_text) for answer in media_answers & current_words):
+                selected_turns = [turn]
+                break
+
+    # 2. Jawaban ukuran: cari riwayat yang benar-benar membahas ukuran.
+    numeric_measurement = bool(re.fullmatch(
+        r"\s*\d+(?:[.,]\d+)?\s*(?:mm|cm|m|meter|inci|inch)\s*",
+        current,
+    ))
+
+    if not selected_turns and numeric_measurement:
+        size_context = re.compile(
+            r"ukuran|tinggi|jarak|kedalaman|diameter|panjang|lebar|"
+            r"\d+\s*[x×]\s*\d+\s*(?:mm|cm|m)|"
+            r"\d+(?:[.,]\d+)?\s*(?:mm|cm|meter|inci|inch)",
+            re.I,
+        )
+
+        for turn in reversed(turns):
+            assistant_text = " ".join(
+                normalize(m.content)
+                for m in turn if m.role != "user"
+            )
+            if size_context.search(assistant_text):
+                # Sertakan giliran sebelumnya karena jawaban ukuran
+                # mungkin merujuk pada ukuran yang sudah disebutkan.
+                turn_index = turns.index(turn)
+                selected_turns = turns[max(0, turn_index - 1):turn_index + 1]
+                break
+
+    # 3. Jawaban angka untuk pertanyaan jumlah.
+    numeric_answer = bool(re.fullmatch(r"\s*\d+\s*", current))
+
+    if not selected_turns and numeric_answer:
+        quantity_context = re.compile(
+            r"berapa banyak|berapa jumlah|jumlah .*berapa|"
+            r"berapa .*bibit|berapa .*tanaman|berapa .*buah",
+            re.I,
+        )
+
+        for turn in reversed(turns):
+            assistant_text = " ".join(
+                normalize(m.content)
+                for m in turn if m.role != "user"
+            )
+            if quantity_context.search(assistant_text):
+                selected_turns = [turn]
+                break
+
+    # 4. Cari topik spesifik di seluruh riwayat sebelum fallback lanjutan.
+    if not selected_turns and current_words:
+        matched = []
+
+        for turn in turns:
+            turn_text = " ".join(
+                normalize(m.content) for m in turn
+            )
+            shared = current_words & words(turn_text)
+
+            topic_match = (
+                bool(shared)
+                and (
+                    len(shared) >= 2
+                    or any(len(word) >= 5 for word in shared)
+                )
+                and len(shared) / max(1, len(current_words)) >= 0.10
+            )
+
+            if topic_match:
+                matched.append(turn)
+
+        if matched:
+            selected_turns = matched
+
+    # 5. Frasa lanjutan tanpa topik spesifik menggunakan konteks terbaru.
+    follow_up_phrases = (
+        "lanjutkan", "teruskan", "lebih detail",
+        "jelaskan lagi", "contoh lainnya",
+        "buatkan versi", "revisi bagian",
+        "ubah bagian", "hapus bagian",
+        "yang tadi", "sebelumnya",
+        "bagaimana dengan", "kalau begitu",
+        "maksudnya",
+    )
+
+    is_follow_up = any(
+        re.search(
+            r"(?<![a-z0-9_])" + re.escape(phrase) + r"(?![a-z0-9_])",
+            current,
+        )
+        for phrase in follow_up_phrases
+    )
+
+    if not selected_turns and is_follow_up:
+        selected_turns = turns[-3:]
+
+    selected = [
+        message
+        for turn in selected_turns
+        for message in turn
+    ]
+
+    return "\n".join(
+        f"{'User' if m.role == 'user' else 'Asisten'}: {(m.content or '')[:500]}"
+        for m in selected
     )
 
 
@@ -164,14 +337,8 @@ def chat(
     )
     history = list(reversed(history))
 
-    history_text = "\n".join(
-        f"{'User' if m.role == 'user' else 'Asisten'}: {m.content[:500]}"
-        for m in history
-    )
-
-    history_block = ""
-    if history_text:
-        history_block = f"Riwayat percakapan (terbaru di akhir):\n{history_text}\n"
+    # Pilih konteks relevan dari riwayat percakapan aktif.
+    history_text = _select_relevant_history(history, data.message)
 
     # Konteks file terunggah (maks 6000 char agar prompt tidak membengkak)
     file_block = ""
