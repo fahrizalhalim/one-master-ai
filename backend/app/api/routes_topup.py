@@ -75,7 +75,7 @@ PACKAGES = {
     },
 }
 
-LEGACY_PLAN_CODE_ALIASES = {
+PLAN_CODE_ALIASES = {
     "basic": "starter",
     "pro": "regular",
     "premium": "professional",
@@ -140,7 +140,10 @@ async def create_topup_request(
     db: Session = Depends(get_db),
 ):
     package_code = package_code.strip().lower()
-    package = PACKAGES.get(package_code)
+    canonical_package_code = PLAN_CODE_ALIASES.get(
+        package_code, package_code
+    )
+    package = PACKAGES.get(canonical_package_code)
     if package is None:
         raise HTTPException(
             status_code=400,
@@ -187,7 +190,7 @@ async def create_topup_request(
         item = TopUpRequest(
             id=str(uuid.uuid4()),
             user_id=user.id,
-            package_code=package_code,
+            package_code=canonical_package_code,
             amount_idr=package["amount_idr"],
             token_amount=package["token_amount"],
             payment_method="qris",
@@ -374,7 +377,7 @@ def review_topup_request(
             )
 
             legacy_package_code = item.package_code.strip().lower()
-            canonical_package_code = LEGACY_PLAN_CODE_ALIASES.get(
+            canonical_package_code = PLAN_CODE_ALIASES.get(
                 legacy_package_code, legacy_package_code
             )
             package = PACKAGES.get(canonical_package_code)
@@ -451,7 +454,7 @@ def review_topup_request(
                 # pembelian tetap menambah saldo, tetapi tidak menurunkan paket.
                 current_rank = (
                     PACKAGES.get(
-                        LEGACY_PLAN_CODE_ALIASES.get(
+                        PLAN_CODE_ALIASES.get(
                             current_plan.code, current_plan.code
                         ),
                         {},
