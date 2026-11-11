@@ -48,6 +48,7 @@ SKILLS = {
         "sampel", "laporan", "grafik", "hipotesis",
         "penelitian", "hibah", "drtpm", "bima", "proposal penelitian",
         "jurnal", "publikasi", "sinta", "scopus", "imrad", "artikel ilmiah",
+        "satria", "pembelajaran transformatif", "lpdp", "riset pembelajaran",
     ],
 }
 
