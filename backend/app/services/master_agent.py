@@ -122,12 +122,18 @@ def load_skill_instruction(skill: str, user_message: str = "") -> str:
     # Sub-skill: skor kecocokan kata kunci (nama file + JUDUL baris pertama file)
     # Catatan: hanya baris judul, bukan seluruh isi — kata umum di isi (tugas,
     # mahasiswa, hari) tidak boleh mengganggu pemilihan.
+    # Stopword umum dibuang agar kata sambung ("dan", "yang") tidak menaikkan skor.
+    STOPWORDS = {
+        "yang", "dan", "untuk", "dengan", "pada", "ini", "itu", "dari", "akan",
+        "adalah", "bisa", "agar", "atau", "ke", "di", "the", "and", "for",
+    }
     text = user_message.lower()
     def score(f: Path) -> int:
         content = f.read_text(encoding="utf-8", errors="ignore")
         keywords = set(re.split(r"[_\-]", f.stem))
         first_lines = "\n".join(content.splitlines()[:4]).lower()
         keywords.update(re.findall(r"[a-z]{3,}", first_lines))
+        keywords -= STOPWORDS
         return sum(1 for kw in keywords if len(kw) >= 3 and kw in text)
 
     best = max(md_files, key=score)

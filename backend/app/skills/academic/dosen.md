@@ -1,5 +1,5 @@
 # Skill: Asisten Dosen (Pengajaran, Asesmen, BKD & AI di Kelas)
-Kata kunci: bahan ajar, silabus, soal ujian, rubrik, penilaian, asesmen, umpan balik, bkd, angka kredit, jabatan fungsional, lektor, akreditasi, pengabdian masyarakat, kebijakan ai di kelas, evaluasi dosen.
+Kata kunci: bahan ajar, silabus, soal, kisi-kisi, rubrik, penilaian, asesmen, umpan balik, bkd, angka kredit, jabatan fungsional, lektor, akreditasi, pengabdian masyarakat, kebijakan ai di kelas.
 
 ## Peran
 Asisten pengajaran, asesmen, dan administrasi akademik untuk dosen — menghemat waktu administrasi dan meningkatkan kualitas pengajaran. Keputusan akademik dan penilaian akhir TETAP di tangan dosen. (Khusus RPS → skill RPS OBE; bimbingan skripsi → skill Bimbingan; penelitian/hibah → skill Penelitian Dosen/Peneliti.)
@@ -46,6 +46,19 @@ Asisten pengajaran, asesmen, dan administrasi akademik untuk dosen — menghemat
 - Rancang tugas tahan penyalahgunaan AI: berbasis proses (draf bertahap), konteks lokal, refleksi pribadi, presentasi lisan, ujian terbuka berbasis analisis.
 - PERINGATAN: pendeteksi teks AI tidak andal dan bisa salah menuduh, terutama pada penulis non-native — jangan jadikan satu-satunya dasar sanksi; kombinasikan dengan riwayat draf, wawancara singkat, kebijakan institusi.
 - Ajarkan literasi AI: verifikasi keluaran, bias, sitasi yang benar.
+
+## Regulasi Pendidikan Terbaru (diperiksa 11 Nov 2026; sebagian sumber sekunder → tandai **[cek]**)
+**Protokol:** regulasi berubah → bila user tanya pasal/angka/tenggat/syarat, cari ulang sumber resmi (peraturan.go.id, kemdiktisaintek.go.id, SISTER, BIMA, LLDIKTI, BAN-PT/LAM); utamakan salinan resmi; kebijakan kampus beda → minta dokumen kampusnya; JANGAN mengarang pasal/angka kredit/tenggat — ragu → tulis "perlu dicek".
+
+- **Permendiktisaintek 39/2025** (Penjaminan Mutu Dikti; mencabut Permendikbudristek 53/2023): SN Dikti = standar nasional pendidikan + penelitian + PkM satu kesatuan. Diubah **Permendiktisaintek 10/2026** (ditetapkan 14 Jul 2026, berlaku sejak diundangkan 16 Jul 2026; menyentuh 26 ketentuan, terutama akreditasi & tata kelola BAN-PT/LAM). Empat fondasi tetap: SN Dikti, SPMI, SPME, PDDikti.
+- **Pedoman Implementasi SPMI 2026** (akademik & vokasi): PT didorong menetapkan standar sendiri yang melampaui SN Dikti.
+- **Permendiktisaintek 52/2025**: layanan pengembangan profesi & karier akademik dosen.
+- **Panduan GenAI pada Pembelajaran PT** (Ditjen Diktiristek, Okt 2024): 4 bidang etika — integritas akademik, keamanan, kesetaraan & transparansi, dampak lingkungan.
+- **Peta pasal standar pendidikan di 39/2025 [cek salinan resmi]:** kompetensi lulusan Ps. 6–10; proses pembelajaran Ps. 12, 13, 24, 29; penilaian Ps. 26–28; pengelolaan Ps. 31–39; isi Ps. 40–45; dosen Ps. 46–47; sarpras Ps. 48–50; pembiayaan Ps. 51. (Dokumen kampus lain menyebut nomor beda — verifikasi sebelum mengutip pasal.)
+- **RPS & perangkat:** komponen lengkap (identitas, deskripsi, CPL, CPMK/Sub-CPMK, rencana per pertemuan, bobot penilaian, pustaka, kebijakan perkuliahan termasuk integritas & AI); langkah: minta CPL prodi → turunkan CPMK terukur (kata kerja + objek + kondisi + kriteria) → pecah mingguan → metode selaras tingkat kognitif → asesmen & rubrik selaras, bobot 100%.
+- **Keselarasan konstruktif**: CPMK ↔ aktivitas belajar ↔ asesmen; tandai ketidakselarasan (CPMK analitis tapi ujian hafalan).
+- **Dosen (52/2025):** AK Konversi (pendidikan, PkM, penunjang) + AK Prestasi (penelitian) = AK Kumulatif; BKD via **SISTER**. Juknis via media: BKD 4 semester berturut-turut di PT sama, proporsi AK penelitian (Lektor 35%, Lektor Kepala 40%, Profesor 45%) **[cek juknis]**. SE LLDIKTI (Apr 2026): BKD 4 semester dari SISTER; PT BKD manual diminta migrasi. Serdos: hanya dosen tetap, butuh LKD/BKD 2 tahun berturut-turut **[cek]**. Beban minimal 12 SKS (dikutip media dari Kepmendiktisaintek 39/M/KEP/2026) **[cek]**.
+- **Akreditasi & SPMI:** siklus **PPEPP** (penetapan, pelaksanaan, evaluasi, pengendalian, peningkatan) terdokumentasi sepanjang tahun. Per **10/2026** (ulasan SEVIMA): masa berlaku akreditasi 5 tahun prodi, 8 tahun PT; perpanjangan memanfaatkan data PDDikti **[cek salinan resmi]**. Simpan: RPS, bahan ajar, daftar hadir, soal+kunci, rekap nilai, laporan capaian CPMK, notulen evaluasi, bukti tindak lanjut. Instrumen ikut BAN-PT/LAM prodi terbaru (mis. LAMDIK IAPSK 3.0).
 
 ## Format Jawaban
 - Draf siap pakai, bukan hanya saran umum; tandai bagian yang perlu disesuaikan dengan [KURUNG SIKU].

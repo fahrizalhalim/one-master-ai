@@ -1,5 +1,5 @@
 # Skill: Pra-Integritas Akademik — Cek ala Turnitin (Sim-Sim, Deteksi Gaya AI, Sitasi)
-Kata kunci: turnitin, plagiarisme, similarity, deteksi ai, cek ai, pra-integritas, duplikasi, indeks kesamaan.
+Kata kunci: turnitin, plagiarisme, similarity, deteksi ai, cek ai, pra-integritas, duplikasi, indeks kesamaan, parafrase, laporan similarity.
 
 ## Peran & Batas Jujur (WAJIB DIBACA KE USER DI AWAL)
 Om AI menyediakan **PRA-CHECK mandiri** yang menyerupai fungsi Turnitin untuk membantu naskah siap sebelum dicek resmi. Om AI **BUKAN Turnitin**:
@@ -35,6 +35,20 @@ Nilai tiap markah per ±1000 kata, lalu susun skor tertimbang. LAPORKAN SEBAGAI 
 ### 5. Bagian Etika
 - Cek indikasi penggunaan AI tanpa disclosure (skor gaya AI tinggi + tanpa pernyataan AI) → sarankan disclosure + Panduan Revisi Legitim: tulis ulang dari data primer, kutipan verbatim informan, detail lokal, posisi penulis.
 - Naskah klaim data primer (wawancara/survei) tapi gaya AI tinggi → ingatkan risiko fabrikasi data; minta bukti transkrip/consent (jangan vonis tanpa bukti).
+
+### 6. Membaca Laporan Turnitin Resmi (bila user punya akses)
+- **Similarity %** = proporsi teks yang cocok dengan sumber lain, BUKAN persentase plagiat.
+- Yang ikut terhitung: kutipan langsung, daftar pustaka, frasa umum, judul bab. Fitur *exclude* (kutipan, daftar pustaka, kecocokan kecil) bisa dipakai bila diizinkan dosen/kampus.
+- Cek **sumber teratas**: kecocokan panjang satu sumber jauh lebih berisiko daripada banyak kecocokan kecil.
+- Batas toleransi ditentukan kampus/dosen (sering 20–30%), bukan Turnitin.
+- Jika skor similarity tinggi: urutkan berdasar sumber teratas → pisahkan (kutipan sah / daftar pustaka / frasa umum vs. teks memang terlalu mirip) → teks yang terlalu mirip: baca ulang sumber, tulis ulang dari pemahaman, tambah analisis, sitasi → cek ulang sesuai aturan kampus.
+
+### 7. Panduan Menulis Aman (utamakan PENCEGAHAN sebelum dicek)
+**Alur menulis aman:** catat sumber sejak awal (penulis, tahun, halaman, DOI/URL) → baca, TUTUP sumber, tulis dengan kata sendiri → bandingkan (makna akurat, kalimat tidak terlalu mirip) → sitasi setiap ide/data yang bukan milik sendiri termasuk yang diparafrase → tambah analisis sendiri (komentar, perbandingan, kritik, hubungan dengan penelitian).
+**Parafrase yang benar:** menyusun ulang gagasan dari pemahaman sendiri (bukan ganti beberapa sinonim); struktur/urutan/sudut pandang berbeda; TETAP disitasi. Tips: ringkas satu paragraf jadi 1–2 kalimat inti, kembangkan dengan konteks penelitian sendiri.
+**Kutipan langsung:** hanya bila kata asli penting (definisi, pernyataan hukum, data spesifik); tanda petik/blok + penulis, tahun, halaman; batasi jumlah.
+**Sitasi & pustaka:** satu gaya konsisten (APA, IEEE, Harvard, Chicago) sesuai pedoman kampus; setiap sitasi di teks ada di pustaka dan sebaliknya; gunakan reference manager (Zotero, Mendeley).
+**Jika ditandai AI keliru:** detektor AI tidak sepenuhnya akurat (bisa salah menandai tulisan manusia, terutama penulis non-native); kumpulkan bukti proses menulis (draf, riwayat versi, catatan, sumber bacaan) dan diskusikan dengan dosen; bila pakai AI sebagai alat bantu, ikuti kebijakan kampus dan ungkapkan bila diwajibkan.
 
 ## Format Output: “Laporan Pra-Integritas om AI”
 Susun laporan dengan struktur ini (pakai tabel di chat; PDF bila diminta):

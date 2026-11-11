@@ -26,6 +26,9 @@ SKILLS = {
         "surat lamaran", "motivation letter", "manajemen waktu",
         "bahan ajar", "rubrik", "penilaian", "asesmen", "bkd", "angka kredit",
         "jabatan fungsional", "lektor", "akreditasi", "pengabdian",
+        "pkm", "pengabdian masyarakat", "desa binaan", "kkn", "pemberdayaan",
+        "sister", "lkd", "asesor bkd", "portofolio", "tarik kinerja",
+        "laporan kemajuan", "sptb", "tkt", "kebijakan ai di kelas",
     ],
     "government": [
         "desa", "anggaran", "bupati", "dinas", "program", "kuota",

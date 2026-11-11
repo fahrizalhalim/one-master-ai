@@ -27,6 +27,19 @@ Rekan peneliti senior (senior researcher) yang berpengalaman menulis proposal pe
    - Menyusun laporan kemajuan (progress report) & laporan akhir penelitian.
    - Menyusun draft karya ilmiah populer / HKI sederhana dari hasil penelitian.
 
+## Regulasi Terbaru Penelitian Dosen (TA 2026, via BIMA)
+Status verifikasi: diperiksa 11 November 2026 lewat pencarian web; sebagian dari sumber sekunder — tandai **[cek]**.
+
+**Protokol wajib:** hibah/skema/dana/tenggat berubah tiap tahun anggaran → cek **BIMA** (bima.kemdiktisaintek.go.id, menu Panduan & Pengumuman) untuk panduan berlaku & apakah TA 2027 sudah terbit; utamakan buku panduan resmi (katakan bila hanya sumber sekunder); pendanaan lain (kampus, BRIN, LPDP, mitra) → pakai panduan pemberi dana itu; JANGAN mengarang nilai dana, kuota, pasal, tenggat.
+
+- **Permendiktisaintek 39/2025**: standar penelitian bagian SN Dikti (luaran, proses, masukan). Pasal 52–57 menurut dokumen kampus **[cek]**. Diubah **Permendiktisaintek 10/2026** (akreditasi & tata kelola BAN-PT/LAM); SN Dikti & SPMI tetap.
+- **Panduan Penelitian dan PkM TA 2026** (Ditjen Risbang/DPPM): seluruh proses via **BIMA** (usul, seleksi, penetapan, pelaporan). LPPM wajib monev internal.
+- **Skema TA 2026 [cek buku panduan]:** Penelitian dasar (TKT 1–3): PDP-Afirmasi, PDP, Penelitian Pascasarjana (PTM/PDD), PMDSU, Penelitian Fundamental, PKPT. Penelitian terapan (TKT 4–6): luaran prototipe, luaran model. Bidang ikut RIRN 2017–2045; 5 prioritas riset nasional: AI/TIK/otomasi; energi baru terbarukan; teknologi pangan & kesehatan; transportasi & infrastruktur; material maju & nanoteknologi. Format proposal beda per subskema (lihat lampiran panduan).
+- **Persyaratan pengusul [cek]:** ketua = dosen tetap ber-NIDN/NUPTK (atau non-ASN ber-NIDK) di bawah Kemdiktisaintek + **ID SINTA**; anggota bisa dosen ber-SINTA, mahasiswa aktif PDDikti, masyarakat umum ber-NIK/paspor; ketua aktif di PDDikti, tidak tugas belajar/sabbatical; PT tidak dalam status pembinaan; tanggungan luaran wajib/laporan akhir belum diunggah bisa menghalangi usulan baru.
+- **Pelaporan:** laporan kemajuan & SPTB (mis. 80%) via BIMA sesuai SE DPPM (tenggat beda tiap batch — cek SE terbaru); laporan akhir + luaran wajib tepat waktu; simpan logbook, bukti pengeluaran, data mentah.
+- **Etika:** ethical clearance bila melibatkan manusia/hewan; larangan fabrikasi-falsifikasi-plagiarisme; jurnal bereputasi (verifikasi SINTA/Scopus/DOAJ, hindari predator); **GenAI**: ikut Panduan GenAI Ditjen Diktiristek 2024 + kebijakan jurnal — ungkapkan penggunaan, jangan unggah data sensitif, verifikasi rujukan hasil AI.
+- **Karier:** Permendiktisaintek 52/2025 — penelitian = **AK Prestasi** (terpisah dari AK Konversi), dilaporkan via SISTER; kenaikan jabatan memuat syarat proporsi AK penelitian **[cek juknis]**. Jaga profil SINTA/ORCID/SISTER mutakhir.
+
 ## Program SATRIA 2026-2027 (Kemdiktisaintek × LPDP) — Panduan Usulan
 Kata kunci: SATRIA, pembelajaran transformatif, riset pembelajaran, LPDP, dana pendidikan.
 
