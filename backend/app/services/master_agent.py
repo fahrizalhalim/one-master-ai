@@ -11,6 +11,10 @@ from app.skills.skill_router import route_skill
 
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
+# Skill dalam folder ini hanya boleh dipakai role admin.
+ADMIN_ONLY_SKILLS = {"admin"}
+GENERAL_SKILL_FALLBACK = "general"
+
 client = OpenAI(
     api_key=OPENAI_API_KEY or "not-set",
     base_url=OPENAI_BASE_URL,
@@ -341,10 +345,17 @@ def prepare_master_prompt(
     full_name: str = "",
     history_text: str = "",
     file_text: str = "",
+    user_role: str = "user",
 ) -> dict:
     """Siapkan prompt lengkap sebelum reservasi token."""
     skill = route_skill(user_message)
-    skill_instruction = load_skill_instruction(skill, user_message)
+
+    # Skill khusus admin (folder "admin") hanya untuk role admin.
+    if skill in ADMIN_ONLY_SKILLS and user_role != "admin":
+        skill = GENERAL_SKILL_FALLBACK
+        skill_instruction = ""
+    else:
+        skill_instruction = load_skill_instruction(skill, user_message)
 
     skill_block = ""
     if skill_instruction:

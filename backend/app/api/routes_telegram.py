@@ -1277,6 +1277,7 @@ async def telegram_webhook(
         full_name=user.full_name or "",
         history_text=history_text,
         file_text=file_text,
+        user_role=user.role or "user",
     )
 
     estimated_tokens = max(

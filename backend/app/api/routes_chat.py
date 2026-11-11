@@ -363,6 +363,7 @@ def chat(
         full_name=current_user.full_name or "",
         history_text=history_text,
         file_text=file_block,
+        user_role=current_user.role or "user",
     )
 
     # Estimasi reservasi awal: token prompt + cadangan output 512 token.

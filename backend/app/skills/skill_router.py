@@ -22,6 +22,10 @@ SKILLS = {
         "validitas", "pemeriksaan naskah", "periksa proposal", "periksa skripsi",
         "turnitin", "plagiarisme", "similarity", "deteksi ai", "cek ai",
         "pra-integritas", "duplikasi", "indeks kesamaan",
+        "cv", "magang", "beasiswa", "wawancara", "karier", "curriculum vitae",
+        "surat lamaran", "motivation letter", "manajemen waktu",
+        "bahan ajar", "rubrik", "penilaian", "asesmen", "bkd", "angka kredit",
+        "jabatan fungsional", "lektor", "akreditasi", "pengabdian",
     ],
     "government": [
         "desa", "anggaran", "bupati", "dinas", "program", "kuota",
@@ -49,6 +53,19 @@ SKILLS = {
         "penelitian", "hibah", "drtpm", "bima", "proposal penelitian",
         "jurnal", "publikasi", "sinta", "scopus", "imrad", "artikel ilmiah",
         "satria", "pembelajaran transformatif", "lpdp", "riset pembelajaran",
+        "systematic review", "meta-analisis", "meta analisis", "prisma",
+        "metodologi", "kajian pustaka", "manuskrip", "reviewer 2",
+        "desain eksperimen", "informed consent", "reprodusibilitas",
+        "reviewer", "respons reviewer", "jawab reviewer", "tanggapan reviewer",
+        "desain penelitian", "fenomenologi", "grounded theory", "etnografi",
+        "ukuran sampel", "power analysis", "triangulasi", "member checking",
+        "validitas", "reliabilitas", "cronbach", "keabsahan data",
+        "peneliti", "riset",
+    ],
+    "admin": [
+        "humanisasi", "humanize", "tulisan natural", "menyunting tulisan",
+        "kesan ai", "bau ai", "terdengar natural", "seperti manusia",
+        "suara penulis", "gaya penulis",
     ],
 }
 
