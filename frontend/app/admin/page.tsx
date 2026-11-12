@@ -38,6 +38,18 @@ type TelegramPendingItem = {
   user_email: string;
 };
 
+type TelegramLinkedItem = {
+  id: string;
+  user_id: string;
+  user_email: string;
+  user_name: string;
+  telegram_username: string | null;
+  telegram_id: string;
+  bot_username: string;
+  status: string;
+  created_at: string | null;
+};
+
 type TokenRow = {
   user_id: string;
   email: string;
@@ -112,6 +124,7 @@ export default function AdminPage() {
   const [tokenRows, setTokenRows] = useState<TokenRow[]>([]);
   const [pending, setPending] = useState<AdminUser[]>([]);
   const [telegramPending, setTelegramPending] = useState<TelegramPendingItem[]>([]);
+  const [telegramLinked, setTelegramLinked] = useState<TelegramLinkedItem[]>([]);
   const [topupRequests, setTopupRequests] = useState<TopUpAdminRequest[]>([]);
   const [reservationReviews, setReservationReviews] = useState<ReservationReview[]>([]);
   const [topupBusy, setTopupBusy] = useState<string | null>(null);
@@ -130,7 +143,7 @@ export default function AdminPage() {
   const load = useCallback(async () => {
     if (!token) return;
     try {
-      const [s, u, k, tk, pd, rv, tp, tg] = await Promise.all([
+      const [s, u, k, tk, pd, rv, tp, tg, tl] = await Promise.all([
         fetch(`${API_URL}/api/v1/admin/stats`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/users`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/skills`, { headers: headers() }),
@@ -141,6 +154,9 @@ export default function AdminPage() {
           headers: headers(),
         }),
         fetch(`${API_URL}/api/v1/admin/telegram/pending`, {
+          headers: headers(),
+        }),
+        fetch(`${API_URL}/api/v1/admin/telegram/linked`, {
           headers: headers(),
         }),
       ]);
@@ -154,6 +170,7 @@ export default function AdminPage() {
       if (tk.ok) setTokenRows(await tk.json());
       if (pd.ok) setPending(await pd.json());
       if (tg.ok) setTelegramPending(await tg.json());
+      if (tl.ok) setTelegramLinked(await tl.json());
       if (rv.ok) {
         const reviewData = await rv.json();
         setReservationReviews(reviewData.items || []);
@@ -457,6 +474,37 @@ export default function AdminPage() {
     }
   }
 
+  function changeTelegramStatus(
+    account: TelegramLinkedItem,
+    isActive: boolean
+  ) {
+    requestAdminPassword({
+      title: `${isActive ? "Aktifkan" : "Nonaktifkan"} koneksi Telegram @${account.bot_username} untuk ${account.user_email}`,
+      url: `${API_URL}/api/v1/admin/telegram/${account.id}/status`,
+      method: "PATCH",
+      body: { is_active: isActive },
+      successMessage: isActive
+        ? `Koneksi Telegram @${account.bot_username} berhasil diaktifkan.`
+        : `Koneksi Telegram @${account.bot_username} berhasil dinonaktifkan.`,
+    });
+  }
+
+  function removeTelegram(account: TelegramLinkedItem) {
+    const confirmed = window.confirm(
+      `Hapus koneksi Telegram @${account.bot_username} dari akun ${account.user_email}? Webhook akan dilepas dan pengguna harus menghubungkan bot kembali. Akun pengguna dan riwayat percakapan tidak dihapus.`
+    );
+
+    if (!confirmed) return;
+
+    requestAdminPassword({
+      title: `Hapus koneksi Telegram @${account.bot_username} milik ${account.user_email}`,
+      url: `${API_URL}/api/v1/admin/telegram/${account.id}`,
+      method: "DELETE",
+      body: {},
+      successMessage: `Koneksi Telegram @${account.bot_username} berhasil dihapus.`,
+    });
+  }
+
   async function openTopupProof(request: TopUpAdminRequest) {
     setProofBusy(request.id);
     setError(null);
@@ -633,10 +681,10 @@ export default function AdminPage() {
                 tab === "telegram" ? "bg-blue-600" : "text-gray-400"
               }`}
             >
-              🤖 Telegram
-              {telegramPending.length > 0 && (
+              🤖 Telegram Tertaut
+              {(telegramLinked.length + telegramPending.length) > 0 && (
                 <span className="absolute -top-1 -right-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-xs text-white">
-                  {telegramPending.length}
+                  {telegramLinked.length + telegramPending.length}
                 </span>
               )}
             </button>
@@ -730,56 +778,170 @@ export default function AdminPage() {
             </div>
           )}
 
-          {/* Tab persetujuan koneksi Telegram */}
+          {/* Telegram Tertaut */}
           {tab === "telegram" && (
-            <div className="mt-6 space-y-3">
-              <div className="rounded-xl border border-blue-800/50 bg-blue-950/20 p-4 text-sm text-blue-200">
-                Persetujuan ini hanya menyetujui pendaftaran bot. Webhook,
-                pengaitan pemilik Telegram, dan pemrosesan pesan belum aktif.
-              </div>
-
-              {telegramPending.length === 0 ? (
-                <div className="rounded-xl border border-gray-800 bg-gray-900 p-8 text-center text-gray-500">
-                  ✅ Tidak ada permintaan koneksi Telegram yang menunggu.
-                </div>
-              ) : (
-                telegramPending.map((account) => (
-                  <div
-                    key={account.id}
-                    className="flex flex-col gap-3 rounded-xl border border-amber-700/40 bg-gray-900 p-4 md:flex-row md:items-center md:justify-between"
-                  >
-                    <div>
-                      <p className="font-semibold">
-                        🤖 @{account.bot_username}
-                      </p>
-                      <p className="mt-1 text-sm text-gray-300">
-                        {account.user_name || "Nama tidak tersedia"} ({account.user_email})
-                      </p>
-                      <p className="mt-1 text-xs text-gray-500">
-                        Diajukan{" "}
-                        {account.created_at
-                          ? new Date(account.created_at).toLocaleString("id-ID")
-                          : "—"}
-                      </p>
-                    </div>
-
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => decideTelegram(account, "approve")}
-                        className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500"
-                      >
-                        ✅ Setujui
-                      </button>
-                      <button
-                        onClick={() => decideTelegram(account, "reject")}
-                        className="rounded-lg border border-red-700/50 px-4 py-2 text-sm font-semibold text-red-300 hover:bg-red-900/40"
-                      >
-                        ⛔ Tolak
-                      </button>
-                    </div>
+            <div className="mt-6 space-y-8">
+              <section className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-semibold">Akun Telegram Tertaut</h2>
+                    <p className="text-sm text-gray-400">
+                      Daftar pengguna yang sudah menghubungkan akun Telegram.
+                    </p>
                   </div>
-                ))
-              )}
+                  <button
+                    onClick={load}
+                    className="rounded-lg bg-gray-700 px-3 py-2 text-xs hover:bg-gray-600"
+                  >
+                    ↻ Muat Ulang
+                  </button>
+                </div>
+
+                {telegramLinked.length === 0 ? (
+                  <div className="rounded-xl border border-gray-800 bg-gray-900 p-8 text-center text-gray-500">
+                    Belum ada akun Telegram yang tertaut.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto rounded-xl border border-gray-800">
+                    <table className="w-full min-w-[760px] text-left text-sm">
+                      <thead className="bg-gray-900 text-gray-400">
+                        <tr>
+                          <th className="px-4 py-3">Email</th>
+                          <th className="px-4 py-3">Nama</th>
+                          <th className="px-4 py-3">Telegram</th>
+                          <th className="px-4 py-3">Bot</th>
+                          <th className="px-4 py-3">Status</th>
+                          <th className="px-4 py-3">Tindakan</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-800">
+                        {telegramLinked.map((account) => (
+                          <tr key={account.id} className="bg-gray-950/50">
+                            <td className="px-4 py-3 text-gray-300">
+                              {account.user_email}
+                            </td>
+                            <td className="px-4 py-3">
+                              {account.user_name || "—"}
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="font-medium text-sky-300">
+                                {account.telegram_username
+                                  ? `@${account.telegram_username}`
+                                  : "Username tidak tersedia"}
+                              </div>
+                              <div className="text-xs text-gray-500">
+                                ID: {account.telegram_id}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-gray-300">
+                              @{account.bot_username}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span
+                                className={`rounded-full px-2 py-1 text-xs ${
+                                  account.status === "active"
+                                    ? "bg-emerald-900/50 text-emerald-300"
+                                    : "bg-amber-900/50 text-amber-300"
+                                }`}
+                              >
+                                {account.status === "active"
+                                  ? "Aktif"
+                                  : account.status === "disabled"
+                                    ? "Nonaktif"
+                                    : account.status}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="flex flex-wrap gap-2">
+                                {account.status === "active" ? (
+                                  <button
+                                    onClick={() =>
+                                      changeTelegramStatus(account, false)
+                                    }
+                                    className="rounded-lg border border-amber-700/60 px-3 py-2 text-xs text-amber-300 hover:bg-amber-900/30"
+                                  >
+                                    Nonaktifkan
+                                  </button>
+                                ) : account.status === "disabled" ? (
+                                  <button
+                                    onClick={() =>
+                                      changeTelegramStatus(account, true)
+                                    }
+                                    className="rounded-lg bg-emerald-700 px-3 py-2 text-xs text-white hover:bg-emerald-600"
+                                  >
+                                    Aktifkan
+                                  </button>
+                                ) : (
+                                  <span className="text-xs text-gray-500">
+                                    Tidak tersedia
+                                  </span>
+                                )}
+                                <button
+                                  onClick={() => removeTelegram(account)}
+                                  className="rounded-lg border border-red-700/60 px-3 py-2 text-xs text-red-300 hover:bg-red-900/30"
+                                >
+                                  Hapus
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+
+              <section className="space-y-3 border-t border-gray-800 pt-6">
+                <div>
+                  <h2 className="text-lg font-semibold">
+                    Permintaan Koneksi Bot Menunggu Persetujuan
+                  </h2>
+                  <p className="text-sm text-gray-400">
+                    Persetujuan pendaftaran bot sebelum pengguna menautkan akun Telegram.
+                  </p>
+                </div>
+
+                {telegramPending.length === 0 ? (
+                  <div className="rounded-xl border border-gray-800 bg-gray-900 p-6 text-center text-gray-500">
+                    Tidak ada permintaan koneksi Telegram yang menunggu.
+                  </div>
+                ) : (
+                  telegramPending.map((account) => (
+                    <div
+                      key={account.id}
+                      className="flex flex-col gap-3 rounded-xl border border-amber-700/40 bg-gray-900 p-4 md:flex-row md:items-center md:justify-between"
+                    >
+                      <div>
+                        <p className="font-semibold">🤖 @{account.bot_username}</p>
+                        <p className="mt-1 text-sm text-gray-300">
+                          {account.user_name || "Nama tidak tersedia"} ({account.user_email})
+                        </p>
+                        <p className="mt-1 text-xs text-gray-500">
+                          Diajukan{" "}
+                          {account.created_at
+                            ? new Date(account.created_at).toLocaleString("id-ID")
+                            : "—"}
+                        </p>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => decideTelegram(account, "approve")}
+                          className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500"
+                        >
+                          ✅ Setujui
+                        </button>
+                        <button
+                          onClick={() => decideTelegram(account, "reject")}
+                          className="rounded-lg border border-red-700/50 px-4 py-2 text-sm font-semibold text-red-300 hover:bg-red-900/40"
+                        >
+                          ⛔ Tolak
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </section>
             </div>
           )}
 

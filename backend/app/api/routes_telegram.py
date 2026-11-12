@@ -633,6 +633,9 @@ async def _deliver_saved_telegram_reply(
     Kirim jawaban yang sudah tersimpan.
     Tidak pernah memanggil AI kembali.
     """
+    if account.status != "active":
+        return False
+
     if not update.assistant_message_id:
         return False
 
@@ -807,6 +810,10 @@ async def telegram_webhook(
         )
     ):
         raise HTTPException(status_code=403, detail="Webhook secret tidak valid.")
+
+    # Akun yang dinonaktifkan tidak boleh memproses update Telegram.
+    if account.status == "disabled":
+        return {"ok": True, "ignored": True, "reason": "account_disabled"}
 
     try:
         payload = await request.json()

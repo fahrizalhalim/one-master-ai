@@ -336,11 +336,14 @@ def complete_reservation(
 
         user_id = reservation_info[0]
 
-        if _lock_user(db, user_id) is None:
+        locked_user = _lock_user(db, user_id)
+        if locked_user is None:
             raise HTTPException(
                 status_code=404,
                 detail="Pengguna reservasi tidak ditemukan.",
             )
+
+        is_admin = locked_user.role == "admin"
 
         reservation = (
             db.query(TokenReservation)
@@ -361,8 +364,12 @@ def complete_reservation(
         reserved_daily = int(reservation.reserved_daily or 0)
         reserved_topup = int(reservation.reserved_topup or 0)
 
-        package_tokens = min(actual_tokens, reserved_daily)
-        topup_actual = actual_tokens - package_tokens
+        if is_admin:
+            package_tokens = actual_tokens
+            topup_actual = 0
+        else:
+            package_tokens = min(actual_tokens, reserved_daily)
+            topup_actual = actual_tokens - package_tokens
 
         if reservation.status == "completed":
             usage = (
@@ -417,6 +424,23 @@ def complete_reservation(
         # Kembalikan bagian Top Up yang direservasi tetapi tidak digunakan.
         topup_refund = max(0, reserved_topup - topup_actual)
         extra = max(0, topup_actual - reserved_topup)
+
+        # Admin tidak dibatasi saldo Top Up.
+        # Pengguna biasa tidak boleh menyelesaikan pemakaian
+        # jika saldo tersedia tidak cukup untuk menutup kelebihannya.
+        available_balance = int(wallet.topup_balance or 0)
+
+        if not is_admin and extra > available_balance:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Saldo Top Up tidak mencukupi untuk menutup kelebihan "
+                    f"pemakaian {extra} token. Saldo tersedia: "
+                    f"{available_balance} token. "
+                    "Hasil AI tetap tersimpan dan settlement menunggu "
+                    "Top Up atau pemeriksaan Admin."
+                ),
+            )
 
         wallet.topup_balance += topup_refund
         wallet.topup_balance -= extra
