@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/app/auth-context";
+import TelegramIcon from "@/app/telegram-icon";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -27,28 +28,6 @@ type Stats = {
 };
 
 type Skill = { name: string; instruction_file: string; chars: number };
-
-type TelegramPendingItem = {
-  id: string;
-  user_id: string;
-  bot_username: string;
-  status: string;
-  created_at: string | null;
-  user_name: string;
-  user_email: string;
-};
-
-type TelegramLinkedItem = {
-  id: string;
-  user_id: string;
-  user_email: string;
-  user_name: string;
-  telegram_username: string | null;
-  telegram_id: string;
-  bot_username: string;
-  status: string;
-  created_at: string | null;
-};
 
 type TokenRow = {
   user_id: string;
@@ -103,6 +82,63 @@ type TopUpAdminRequest = {
   user_email: string;
 };
 
+type AdminPackage = {
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  price_idr: number;
+  token_amount: number;
+  daily_token_limit: number;
+  duration_days: number;
+  max_users: number | null;
+  active_users: number;
+  available_slots: number | null;
+  is_full: boolean;
+  sort_order: number;
+  is_active: boolean;
+  qris_image: string | null;
+  qris_image_url: string | null;
+  has_qris: boolean;
+};
+
+type PackageForm = {
+  code: string;
+  name: string;
+  description: string;
+  price_idr: string;
+  token_amount: string;
+  daily_token_limit: string;
+  duration_days: string;
+  max_users: string;
+  sort_order: string;
+  is_active: boolean;
+};
+
+type TelegramCentralReviewItem = {
+  update_id: number;
+  user_id: string | null;
+  email: string | null;
+  full_name: string | null;
+  telegram_user_id: number;
+  status: string;
+  error_code: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+type TelegramCentralUser = {
+  user_id: string;
+  email: string;
+  full_name: string | null;
+  telegram_user_id: number;
+  telegram_username: string | null;
+  link_is_active: boolean;
+  user_status: string;
+  user_is_active: boolean;
+  linked_at: string | null;
+};
+
 type ProtectedAdminAction = {
   title: string;
   url: string;
@@ -118,14 +154,33 @@ export default function AdminPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
-  const [tab, setTab] = useState<"users" | "skills" | "tokens" | "pending" | "topups" | "review" | "telegram">("users");
+  const [tab, setTab] = useState<
+  | "users"
+  | "skills"
+  | "tokens"
+  | "pending"
+  | "topups"
+  | "packages"
+  | "review"
+  | "telegram-central"
+>("users");
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [tokenRows, setTokenRows] = useState<TokenRow[]>([]);
   const [pending, setPending] = useState<AdminUser[]>([]);
-  const [telegramPending, setTelegramPending] = useState<TelegramPendingItem[]>([]);
-  const [telegramLinked, setTelegramLinked] = useState<TelegramLinkedItem[]>([]);
+
+const [telegramCentralReview, setTelegramCentralReview] =
+  useState<TelegramCentralReviewItem[]>([]);
+const [telegramCentralUsers, setTelegramCentralUsers] =
+  useState<TelegramCentralUser[]>([]);
+const [telegramCentralSection, setTelegramCentralSection] =
+  useState<"users" | "monitoring">("users");
   const [topupRequests, setTopupRequests] = useState<TopUpAdminRequest[]>([]);
+  const [adminPackages, setAdminPackages] = useState<AdminPackage[]>([]);
+  const [packageEditor, setPackageEditor] = useState<PackageForm | null>(null);
+  const [editingPackageCode, setEditingPackageCode] = useState<string | null>(null);
+  const [packageBusy, setPackageBusy] = useState(false);
+  const [qrisFiles, setQrisFiles] = useState<Record<string, File | null>>({});
   const [reservationReviews, setReservationReviews] = useState<ReservationReview[]>([]);
   const [topupBusy, setTopupBusy] = useState<string | null>(null);
   const [proofUrl, setProofUrl] = useState<string | null>(null);
@@ -143,8 +198,8 @@ export default function AdminPage() {
   const load = useCallback(async () => {
     if (!token) return;
     try {
-      const [s, u, k, tk, pd, rv, tp, tg, tl] = await Promise.all([
-        fetch(`${API_URL}/api/v1/admin/stats`, { headers: headers() }),
+        const [s, u, k, tk, pd, rv, tp, pk, tc, tu] = await Promise.all([
+fetch(`${API_URL}/api/v1/admin/stats`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/users`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/skills`, { headers: headers() }),
         fetch(`${API_URL}/api/v1/admin/tokens`, { headers: headers() }),
@@ -153,10 +208,14 @@ export default function AdminPage() {
         fetch(`${API_URL}/api/v1/topup/admin/requests?status_filter=pending`, {
           headers: headers(),
         }),
-        fetch(`${API_URL}/api/v1/admin/telegram/pending`, {
+        fetch(`${API_URL}/api/v1/topup/admin/packages`, {
           headers: headers(),
         }),
-        fetch(`${API_URL}/api/v1/admin/telegram/linked`, {
+
+        fetch(`${API_URL}/api/v1/admin/telegram-central/review`, {
+          headers: headers(),
+        }),
+        fetch(`${API_URL}/api/v1/admin/telegram-central/users`, {
           headers: headers(),
         }),
       ]);
@@ -169,8 +228,16 @@ export default function AdminPage() {
       if (k.ok) setSkills(await k.json());
       if (tk.ok) setTokenRows(await tk.json());
       if (pd.ok) setPending(await pd.json());
-      if (tg.ok) setTelegramPending(await tg.json());
-      if (tl.ok) setTelegramLinked(await tl.json());
+
+
+if (tc.ok) {
+  const centralData = await tc.json();
+  setTelegramCentralReview(centralData.items || []);
+}
+if (tu.ok) {
+  const centralUsersData = await tu.json();
+  setTelegramCentralUsers(centralUsersData.items || []);
+}
       if (rv.ok) {
         const reviewData = await rv.json();
         setReservationReviews(reviewData.items || []);
@@ -178,6 +245,10 @@ export default function AdminPage() {
       if (tp.ok) {
         const topupData = await tp.json();
         setTopupRequests(topupData.requests || []);
+      }
+      if (pk.ok) {
+        const packageData = await pk.json();
+        setAdminPackages(packageData.packages || []);
       }
     } catch {
       setError("Gagal memuat data admin.");
@@ -381,6 +452,232 @@ export default function AdminPage() {
     });
   }
 
+  function openNewPackage() {
+    setEditingPackageCode(null);
+    setPackageEditor({
+      code: "",
+      name: "",
+      description: "",
+      price_idr: "17000",
+      token_amount: "50000",
+      daily_token_limit: "50000",
+      duration_days: "7",
+      max_users: "10",
+      sort_order: String(adminPackages.length + 1),
+      is_active: true,
+    });
+    setError(null);
+  }
+
+  function openEditPackage(pkg: AdminPackage) {
+    setEditingPackageCode(pkg.code);
+    setPackageEditor({
+      code: pkg.code,
+      name: pkg.name,
+      description: pkg.description || "",
+      price_idr: String(pkg.price_idr),
+      token_amount: String(pkg.token_amount),
+      daily_token_limit: String(pkg.daily_token_limit),
+      duration_days: String(pkg.duration_days),
+      max_users: pkg.max_users === null ? "" : String(pkg.max_users),
+      sort_order: String(pkg.sort_order),
+      is_active: pkg.is_active,
+    });
+    setError(null);
+  }
+
+  async function savePackage(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!packageEditor || packageBusy) return;
+
+    const form = packageEditor;
+    const positiveFields = [
+      ["Harga", form.price_idr],
+      ["Jumlah token", form.token_amount],
+      ["Batas token harian", form.daily_token_limit],
+      ["Durasi", form.duration_days],
+    ] as const;
+
+    for (const [label, raw] of positiveFields) {
+      const value = Number(raw);
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        setError(`${label} harus berupa bilangan bulat positif.`);
+        return;
+      }
+    }
+
+    const maxUsers = form.max_users.trim() === ""
+      ? null
+      : Number(form.max_users);
+
+    if (
+      maxUsers !== null &&
+      (!Number.isSafeInteger(maxUsers) || maxUsers < 1)
+    ) {
+      setError("Kapasitas harus bilangan bulat minimal 1 atau dikosongkan untuk tanpa batas.");
+      return;
+    }
+
+    const sortOrder = Number(form.sort_order);
+    if (!Number.isSafeInteger(sortOrder) || sortOrder < 0) {
+      setError("Urutan paket harus bilangan bulat nol atau lebih.");
+      return;
+    }
+
+    if (!form.name.trim()) {
+      setError("Nama paket wajib diisi.");
+      return;
+    }
+
+    if (
+      !editingPackageCode &&
+      !/^[a-z0-9][a-z0-9_-]*$/.test(form.code)
+    ) {
+      setError("Kode paket hanya boleh berisi huruf kecil, angka, garis bawah, atau tanda hubung.");
+      return;
+    }
+
+    const payload = {
+      name: form.name.trim(),
+      description: form.description.trim(),
+      price_idr: Number(form.price_idr),
+      token_amount: Number(form.token_amount),
+      daily_token_limit: Number(form.daily_token_limit),
+      duration_days: Number(form.duration_days),
+      max_users: maxUsers,
+      sort_order: sortOrder,
+      is_active: form.is_active,
+    };
+
+    setPackageBusy(true);
+    setError(null);
+
+    try {
+      const res = await fetch(
+        editingPackageCode
+          ? `${API_URL}/api/v1/topup/admin/packages/${encodeURIComponent(editingPackageCode)}`
+          : `${API_URL}/api/v1/topup/admin/packages`,
+        {
+          method: editingPackageCode ? "PATCH" : "POST",
+          headers: {
+            ...headers(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(
+            editingPackageCode ? payload : { ...payload, code: form.code }
+          ),
+        }
+      );
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        setError(data.detail || "Gagal menyimpan paket.");
+        return;
+      }
+
+      setPackageEditor(null);
+      setEditingPackageCode(null);
+      await load();
+      flash(data.message || "Paket berhasil disimpan.");
+    } catch {
+      setError("Tidak dapat menghubungi server saat menyimpan paket.");
+    } finally {
+      setPackageBusy(false);
+    }
+  }
+
+  async function uploadPackageQris(code: string) {
+    const file = qrisFiles[code];
+    if (!file || packageBusy) return;
+
+    if (!["image/png", "image/jpeg"].includes(file.type)) {
+      setError("QRIS harus berupa gambar PNG atau JPG.");
+      return;
+    }
+
+    if (file.size <= 0 || file.size > 5 * 1024 * 1024) {
+      setError("Ukuran gambar QRIS harus lebih dari 0 dan maksimal 5 MB.");
+      return;
+    }
+
+    const body = new FormData();
+    body.append("image", file);
+
+    setPackageBusy(true);
+    setError(null);
+
+    try {
+      const res = await fetch(
+        `${API_URL}/api/v1/topup/admin/packages/${encodeURIComponent(code)}/qris`,
+        {
+          method: "POST",
+          headers: headers(),
+          body,
+        }
+      );
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        setError(data.detail || "Gagal mengunggah QRIS.");
+        return;
+      }
+
+      setQrisFiles((current) => ({ ...current, [code]: null }));
+      await load();
+      flash(data.message || "QRIS berhasil diunggah.");
+    } catch {
+      setError("Tidak dapat menghubungi server saat mengunggah QRIS.");
+    } finally {
+      setPackageBusy(false);
+    }
+  }
+
+  async function togglePackage(pkg: AdminPackage) {
+    const nextActive = !pkg.is_active;
+
+    const confirmed = window.confirm(
+      `${nextActive ? "Aktifkan" : "Nonaktifkan"} paket ${pkg.name}?\n\n` +
+      (nextActive
+        ? "Paket akan ditampilkan kembali jika QRIS tersedia."
+        : "Paket tidak dapat dipilih oleh pelanggan baru. Riwayat transaksi dan pelanggan lama tidak dihapus.")
+    );
+
+    if (!confirmed || packageBusy) return;
+
+    setPackageBusy(true);
+    setError(null);
+
+    try {
+      const res = await fetch(
+        `${API_URL}/api/v1/topup/admin/packages/${encodeURIComponent(pkg.code)}`,
+        {
+          method: "PATCH",
+          headers: {
+            ...headers(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ is_active: nextActive }),
+        }
+      );
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        setError(data.detail || "Gagal mengubah status paket.");
+        return;
+      }
+
+      await load();
+      flash(data.message || "Status paket berhasil diperbarui.");
+    } catch {
+      setError("Tidak dapat menghubungi server saat mengubah status paket.");
+    } finally {
+      setPackageBusy(false);
+    }
+  }
+
   async function removeUser(u: AdminUser) {
     requestAdminPassword({
       title: `HAPUS PERMANEN akun ${u.email}. Masukkan password login admin untuk melanjutkan.`,
@@ -433,76 +730,6 @@ export default function AdminPage() {
         : `⛔ ${u.email} DITOLAK.`
     );
     load();
-  }
-
-  async function decideTelegram(
-    account: TelegramPendingItem,
-    decision: "approve" | "reject"
-  ) {
-    setError(null);
-
-    try {
-      const res = await fetch(
-        `${API_URL}/api/v1/admin/telegram/${account.id}/decision`,
-        {
-          method: "POST",
-          headers: { ...headers(), "Content-Type": "application/json" },
-          body: JSON.stringify({ decision }),
-        }
-      );
-
-      const data = await res.json().catch(() => ({}));
-
-      if (!res.ok) {
-        setError(data.detail || "Gagal memproses persetujuan Telegram.");
-        return;
-      }
-
-      setTelegramPending((items) =>
-        items.filter((item) => item.id !== account.id)
-      );
-
-      flash(
-        decision === "approve"
-          ? `✅ @${account.bot_username} disetujui. Menunggu aktivasi teknis.`
-          : `⛔ @${account.bot_username} ditolak.`
-      );
-
-      await load();
-    } catch {
-      setError("Tidak dapat menghubungi server untuk memproses Telegram.");
-    }
-  }
-
-  function changeTelegramStatus(
-    account: TelegramLinkedItem,
-    isActive: boolean
-  ) {
-    requestAdminPassword({
-      title: `${isActive ? "Aktifkan" : "Nonaktifkan"} koneksi Telegram @${account.bot_username} untuk ${account.user_email}`,
-      url: `${API_URL}/api/v1/admin/telegram/${account.id}/status`,
-      method: "PATCH",
-      body: { is_active: isActive },
-      successMessage: isActive
-        ? `Koneksi Telegram @${account.bot_username} berhasil diaktifkan.`
-        : `Koneksi Telegram @${account.bot_username} berhasil dinonaktifkan.`,
-    });
-  }
-
-  function removeTelegram(account: TelegramLinkedItem) {
-    const confirmed = window.confirm(
-      `Hapus koneksi Telegram @${account.bot_username} dari akun ${account.user_email}? Webhook akan dilepas dan pengguna harus menghubungkan bot kembali. Akun pengguna dan riwayat percakapan tidak dihapus.`
-    );
-
-    if (!confirmed) return;
-
-    requestAdminPassword({
-      title: `Hapus koneksi Telegram @${account.bot_username} milik ${account.user_email}`,
-      url: `${API_URL}/api/v1/admin/telegram/${account.id}`,
-      method: "DELETE",
-      body: {},
-      successMessage: `Koneksi Telegram @${account.bot_username} berhasil dihapus.`,
-    });
   }
 
   async function openTopupProof(request: TopUpAdminRequest) {
@@ -655,6 +882,14 @@ export default function AdminPage() {
               )}
             </button>
             <button
+              onClick={() => setTab("packages")}
+              className={`min-w-max shrink-0 rounded-lg px-3 py-3 font-medium ${
+                tab === "packages" ? "bg-blue-600" : "text-gray-400"
+              }`}
+            >
+              📦 Paket
+            </button>
+            <button
               onClick={() => setTab("users")}
               className={`min-w-max shrink-0 rounded-lg px-3 py-3 font-medium ${
                 tab === "users" ? "bg-blue-600" : "text-gray-400"
@@ -675,19 +910,23 @@ export default function AdminPage() {
                 </span>
               )}
             </button>
-            <button
-              onClick={() => setTab("telegram")}
-              className={`relative min-w-max shrink-0 rounded-lg px-3 py-3 font-medium ${
-                tab === "telegram" ? "bg-blue-600" : "text-gray-400"
-              }`}
-            >
-              🤖 Telegram Tertaut
-              {(telegramLinked.length + telegramPending.length) > 0 && (
-                <span className="absolute -top-1 -right-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-xs text-white">
-                  {telegramLinked.length + telegramPending.length}
+              <button
+                onClick={() => setTab("telegram-central")}
+                className={`relative min-w-max shrink-0 rounded-lg px-3 py-3 font-medium ${
+                  tab === "telegram-central" ? "bg-blue-600" : "text-gray-400"
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <TelegramIcon size={18} />
+                  Telegram Pusat
                 </span>
-              )}
-            </button>
+
+                {telegramCentralReview.length > 0 && (
+                  <span className="absolute -top-1 -right-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500 px-1 text-xs text-black">
+                    {telegramCentralReview.length}
+                  </span>
+                )}
+              </button>
 
             <button
               onClick={() => setTab("tokens")}
@@ -778,172 +1017,279 @@ export default function AdminPage() {
             </div>
           )}
 
-          {/* Telegram Tertaut */}
-          {tab === "telegram" && (
-            <div className="mt-6 space-y-8">
-              <section className="space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-3">
+{/* Monitoring Telegram Pusat */}
+{tab === "telegram-central" && (
+  <div className="mt-6 space-y-4">
+    <div className="flex flex-wrap gap-2">
+      <button
+        onClick={() => setTelegramCentralSection("users")}
+        className={`rounded-lg px-4 py-2 text-sm font-medium ${
+          telegramCentralSection === "users"
+            ? "bg-blue-600 text-white"
+            : "bg-gray-800 text-gray-300"
+        }`}
+      >
+        Pengguna Terhubung ({telegramCentralUsers.length})
+      </button>
+      <button
+        onClick={() => setTelegramCentralSection("monitoring")}
+        className={`rounded-lg px-4 py-2 text-sm font-medium ${
+          telegramCentralSection === "monitoring"
+            ? "bg-blue-600 text-white"
+            : "bg-gray-800 text-gray-300"
+        }`}
+      >
+        Monitoring Pesan ({telegramCentralReview.length})
+      </button>
+    </div>
+
+    {telegramCentralSection === "users" ? (
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">
+              Pengguna Telegram Terhubung
+            </h2>
+            <p className="text-sm text-gray-400">
+              Daftar akun OM.AI yang memiliki identitas Telegram terhubung.
+            </p>
+          </div>
+          <button
+            onClick={load}
+            className="rounded-lg bg-gray-700 px-3 py-2 text-xs hover:bg-gray-600"
+          >
+            ↻ Muat Ulang
+          </button>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900 p-4">
+          <p className="text-sm text-gray-400">Total pengguna terhubung</p>
+          <p className="mt-1 text-2xl font-bold">
+            {telegramCentralUsers.length}
+          </p>
+        </div>
+
+        {telegramCentralUsers.length === 0 ? (
+          <div className="rounded-xl border border-gray-800 bg-gray-900 p-8 text-center text-gray-400">
+            Belum ada pengguna Telegram yang terhubung.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {telegramCentralUsers.map((item) => (
+              <div
+                key={item.user_id}
+                className="rounded-xl border border-gray-800 bg-gray-900 p-4"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <h2 className="text-lg font-semibold">Akun Telegram Tertaut</h2>
-                    <p className="text-sm text-gray-400">
-                      Daftar pengguna yang sudah menghubungkan akun Telegram.
+                    <p className="font-semibold">
+                      {item.full_name || "Nama tidak tersedia"}
                     </p>
+                    <p className="text-sm text-gray-400">{item.email}</p>
                   </div>
-                  <button
-                    onClick={load}
-                    className="rounded-lg bg-gray-700 px-3 py-2 text-xs hover:bg-gray-600"
-                  >
-                    ↻ Muat Ulang
-                  </button>
+                  <span className={`rounded-full px-3 py-1 text-xs ${
+                    item.link_is_active && item.user_is_active &&
+                    item.user_status === "active"
+                      ? "bg-emerald-900/50 text-emerald-300"
+                      : "bg-amber-900/50 text-amber-300"
+                  }`}>
+                    {item.link_is_active ? "Terhubung" : "Tidak aktif"}
+                  </span>
                 </div>
 
-                {telegramLinked.length === 0 ? (
-                  <div className="rounded-xl border border-gray-800 bg-gray-900 p-8 text-center text-gray-500">
-                    Belum ada akun Telegram yang tertaut.
+                <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+                  <div>
+                    <span className="text-gray-500">Telegram:</span>{" "}
+                    <span className="text-gray-300">
+                      {item.telegram_username
+                        ? `@${item.telegram_username.replace(/^@/, "")}`
+                        : "Username tidak tersedia"}
+                    </span>
                   </div>
-                ) : (
-                  <div className="overflow-x-auto rounded-xl border border-gray-800">
-                    <table className="w-full min-w-[760px] text-left text-sm">
-                      <thead className="bg-gray-900 text-gray-400">
-                        <tr>
-                          <th className="px-4 py-3">Email</th>
-                          <th className="px-4 py-3">Nama</th>
-                          <th className="px-4 py-3">Telegram</th>
-                          <th className="px-4 py-3">Bot</th>
-                          <th className="px-4 py-3">Status</th>
-                          <th className="px-4 py-3">Tindakan</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-800">
-                        {telegramLinked.map((account) => (
-                          <tr key={account.id} className="bg-gray-950/50">
-                            <td className="px-4 py-3 text-gray-300">
-                              {account.user_email}
-                            </td>
-                            <td className="px-4 py-3">
-                              {account.user_name || "—"}
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="font-medium text-sky-300">
-                                {account.telegram_username
-                                  ? `@${account.telegram_username}`
-                                  : "Username tidak tersedia"}
-                              </div>
-                              <div className="text-xs text-gray-500">
-                                ID: {account.telegram_id}
-                              </div>
-                            </td>
-                            <td className="px-4 py-3 text-gray-300">
-                              @{account.bot_username}
-                            </td>
-                            <td className="px-4 py-3">
-                              <span
-                                className={`rounded-full px-2 py-1 text-xs ${
-                                  account.status === "active"
-                                    ? "bg-emerald-900/50 text-emerald-300"
-                                    : "bg-amber-900/50 text-amber-300"
-                                }`}
-                              >
-                                {account.status === "active"
-                                  ? "Aktif"
-                                  : account.status === "disabled"
-                                    ? "Nonaktif"
-                                    : account.status}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="flex flex-wrap gap-2">
-                                {account.status === "active" ? (
-                                  <button
-                                    onClick={() =>
-                                      changeTelegramStatus(account, false)
-                                    }
-                                    className="rounded-lg border border-amber-700/60 px-3 py-2 text-xs text-amber-300 hover:bg-amber-900/30"
-                                  >
-                                    Nonaktifkan
-                                  </button>
-                                ) : account.status === "disabled" ? (
-                                  <button
-                                    onClick={() =>
-                                      changeTelegramStatus(account, true)
-                                    }
-                                    className="rounded-lg bg-emerald-700 px-3 py-2 text-xs text-white hover:bg-emerald-600"
-                                  >
-                                    Aktifkan
-                                  </button>
-                                ) : (
-                                  <span className="text-xs text-gray-500">
-                                    Tidak tersedia
-                                  </span>
-                                )}
-                                <button
-                                  onClick={() => removeTelegram(account)}
-                                  className="rounded-lg border border-red-700/60 px-3 py-2 text-xs text-red-300 hover:bg-red-900/30"
-                                >
-                                  Hapus
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <div>
+                    <span className="text-gray-500">Telegram ID:</span>{" "}
+                    <span className="text-gray-300">
+                      {item.telegram_user_id}
+                    </span>
                   </div>
-                )}
-              </section>
+                  <div>
+                    <span className="text-gray-500">Status akun OM.AI:</span>{" "}
+                    <span className="text-gray-300">
+                      {item.user_status} / {item.user_is_active ? "Aktif" : "Nonaktif"}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Tanggal pengaitan:</span>{" "}
+                    <span className="text-gray-300">
+                      {item.linked_at
+                        ? new Date(item.linked_at).toLocaleString("id-ID")
+                        : "—"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    ) : (
+      <>
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h2 className="text-lg font-semibold">
+          Monitoring Telegram Pusat
+        </h2>
+        <p className="text-sm text-gray-400">
+          Pemeriksaan pengiriman pesan dan pemulihan jawaban Telegram.
+        </p>
+      </div>
 
-              <section className="space-y-3 border-t border-gray-800 pt-6">
+      <button
+        onClick={load}
+        className="rounded-lg bg-gray-700 px-3 py-2 text-xs hover:bg-gray-600"
+      >
+        ↻ Muat Ulang
+      </button>
+    </div>
+
+    <div className="rounded-xl border border-gray-800 bg-gray-900 p-4">
+      <p className="text-sm text-gray-400">
+        Total kasus yang perlu diperiksa
+      </p>
+      <p className="mt-1 text-2xl font-bold">
+        {telegramCentralReview.length}
+      </p>
+    </div>
+
+    {telegramCentralReview.length === 0 ? (
+      <div className="rounded-xl border border-gray-800 bg-gray-900 p-8 text-center text-gray-400">
+        <p className="text-2xl">✅</p>
+        <p className="mt-2 font-medium">
+          Tidak ada kasus Telegram yang perlu diperiksa.
+        </p>
+      </div>
+    ) : (
+      <div className="space-y-3">
+        {telegramCentralReview.map((item) => {
+          const retryAllowed =
+            (item.status === "needs_review" &&
+              [
+                "chat_result_uncertain",
+                "chat_processing_uncertain",
+              ].includes(item.error_code || "")) ||
+            (item.status === "reply_pending" &&
+              item.error_code === "telegram_send_failed");
+
+          const manualOnly =
+            item.error_code === "telegram_delivery_uncertain";
+
+          return (
+            <div
+              key={item.update_id}
+              className="rounded-xl border border-gray-800 bg-gray-900 p-4"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <h2 className="text-lg font-semibold">
-                    Permintaan Koneksi Bot Menunggu Persetujuan
-                  </h2>
+                  <p className="font-semibold">
+                    {item.full_name || "Nama tidak tersedia"}
+                  </p>
                   <p className="text-sm text-gray-400">
-                    Persetujuan pendaftaran bot sebelum pengguna menautkan akun Telegram.
+                    {item.email || "Email tidak tersedia"}
                   </p>
                 </div>
 
-                {telegramPending.length === 0 ? (
-                  <div className="rounded-xl border border-gray-800 bg-gray-900 p-6 text-center text-gray-500">
-                    Tidak ada permintaan koneksi Telegram yang menunggu.
-                  </div>
-                ) : (
-                  telegramPending.map((account) => (
-                    <div
-                      key={account.id}
-                      className="flex flex-col gap-3 rounded-xl border border-amber-700/40 bg-gray-900 p-4 md:flex-row md:items-center md:justify-between"
-                    >
-                      <div>
-                        <p className="font-semibold">🤖 @{account.bot_username}</p>
-                        <p className="mt-1 text-sm text-gray-300">
-                          {account.user_name || "Nama tidak tersedia"} ({account.user_email})
-                        </p>
-                        <p className="mt-1 text-xs text-gray-500">
-                          Diajukan{" "}
-                          {account.created_at
-                            ? new Date(account.created_at).toLocaleString("id-ID")
-                            : "—"}
-                        </p>
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => decideTelegram(account, "approve")}
-                          className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500"
-                        >
-                          ✅ Setujui
-                        </button>
-                        <button
-                          onClick={() => decideTelegram(account, "reject")}
-                          className="rounded-lg border border-red-700/50 px-4 py-2 text-sm font-semibold text-red-300 hover:bg-red-900/40"
-                        >
-                          ⛔ Tolak
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </section>
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-medium ${
+                    manualOnly
+                      ? "bg-red-900/50 text-red-300"
+                      : retryAllowed
+                        ? "bg-amber-900/50 text-amber-300"
+                        : "bg-gray-800 text-gray-300"
+                  }`}
+                >
+                  {manualOnly
+                    ? "Pemeriksaan Manual"
+                    : retryAllowed
+                      ? "Dapat Dipulihkan"
+                      : "Sedang Diproses"}
+                </span>
+              </div>
+
+              <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+                <div>
+                  <span className="text-gray-500">Update ID:</span>{" "}
+                  <span className="text-gray-300">{item.update_id}</span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Telegram ID:</span>{" "}
+                  <span className="text-gray-300">{item.telegram_user_id}</span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Status:</span>{" "}
+                  <span className="text-gray-300">{item.status}</span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Error:</span>{" "}
+                  <span className="text-gray-300">{item.error_code || "—"}</span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Dibuat:</span>{" "}
+                  <span className="text-gray-300">
+                    {item.created_at
+                      ? new Date(item.created_at).toLocaleString("id-ID")
+                      : "—"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Diperbarui:</span>{" "}
+                  <span className="text-gray-300">
+                    {item.updated_at
+                      ? new Date(item.updated_at).toLocaleString("id-ID")
+                      : "—"}
+                  </span>
+                </div>
+              </div>
+
+              {manualOnly && (
+                <div className="mt-3 rounded-lg border border-red-800/50 bg-red-950/30 p-3 text-xs text-red-300">
+                  Pengiriman sebelumnya mungkin sudah diterima pengguna.
+                  Jangan kirim ulang secara otomatis untuk mencegah pesan
+                  ganda. Periksa riwayat pengiriman secara manual.
+                </div>
+              )}
+
+              {retryAllowed && (
+                <div className="mt-4">
+                  <button
+                    onClick={() =>
+                      requestAdminPassword({
+                        title:
+                          `Verifikasi retry Telegram untuk Update ID ${item.update_id}. ` +
+                          "Backend akan memeriksa jawaban tersimpan sebelum mengirim ulang.",
+                        url:
+                          `${API_URL}/api/v1/admin/telegram-central/` +
+                          `${item.update_id}/retry-delivery`,
+                        method: "POST",
+                        body: {},
+                        successMessage: "Permintaan pemulihan Telegram diproses.",
+                      })
+                    }
+                    className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-500"
+                  >
+                    ↻ Verifikasi & Retry Pengiriman
+                  </button>
+                </div>
+              )}
             </div>
-          )}
+          );
+        })}
+      </div>
+    )}
+      </>
+    )}
+  </div>
+)}
+
 
           {/* Tab persetujuan pembayaran Top Up */}
           {tab === "topups" && (
@@ -1070,6 +1416,372 @@ export default function AdminPage() {
                       />
                     )}
                   </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Manajemen paket langganan */}
+          {tab === "packages" && (
+            <div className="mt-6 space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-800 bg-gray-900 p-4">
+                <div>
+                  <h2 className="text-lg font-semibold">📦 Manajemen Paket</h2>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Kelola harga, token, batas harian, durasi, kapasitas, dan QRIS setiap paket.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={load}
+                    className="rounded-lg border border-gray-700 px-3 py-2 text-sm hover:bg-gray-800"
+                  >
+                    ↻ Muat Ulang
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openNewPackage}
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500"
+                  >
+                    + Tambah Paket
+                  </button>
+                </div>
+              </div>
+
+              {packageEditor && (
+                <form
+                  onSubmit={savePackage}
+                  className="space-y-4 rounded-xl border border-blue-700/50 bg-gray-900 p-4"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="font-semibold">
+                      {editingPackageCode ? "Edit Paket" : "Buat Paket Baru"}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPackageEditor(null);
+                        setEditingPackageCode(null);
+                        setError(null);
+                      }}
+                      className="rounded-lg border border-gray-700 px-3 py-1 text-sm text-gray-300 hover:bg-gray-800"
+                    >
+                      Batal
+                    </button>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {!editingPackageCode && (
+                      <label className="space-y-1 text-sm">
+                        <span className="text-gray-300">Kode paket</span>
+                        <input
+                          required
+                          pattern="[a-z0-9][a-z0-9_-]*"
+                          maxLength={50}
+                          value={packageEditor.code}
+                          onChange={(event) =>
+                            setPackageEditor({ ...packageEditor, code: event.target.value })
+                          }
+                          placeholder="contoh: premium"
+                          className="w-full rounded-lg border border-gray-700 bg-black px-3 py-2 text-white outline-none focus:border-blue-500"
+                        />
+                      </label>
+                    )}
+
+                    <label className="space-y-1 text-sm">
+                      <span className="text-gray-300">Nama paket</span>
+                      <input
+                        required
+                        maxLength={100}
+                        value={packageEditor.name}
+                        onChange={(event) =>
+                          setPackageEditor({ ...packageEditor, name: event.target.value })
+                        }
+                        className="w-full rounded-lg border border-gray-700 bg-black px-3 py-2 text-white outline-none focus:border-blue-500"
+                      />
+                    </label>
+
+                    <label className="space-y-1 text-sm">
+                      <span className="text-gray-300">Harga (Rupiah)</span>
+                      <input
+                        required
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={packageEditor.price_idr}
+                        onChange={(event) =>
+                          setPackageEditor({ ...packageEditor, price_idr: event.target.value })
+                        }
+                        className="w-full rounded-lg border border-gray-700 bg-black px-3 py-2 text-white outline-none focus:border-blue-500"
+                      />
+                    </label>
+
+                    <label className="space-y-1 text-sm">
+                      <span className="text-gray-300">Jumlah token</span>
+                      <input
+                        required
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={packageEditor.token_amount}
+                        onChange={(event) =>
+                          setPackageEditor({ ...packageEditor, token_amount: event.target.value })
+                        }
+                        className="w-full rounded-lg border border-gray-700 bg-black px-3 py-2 text-white outline-none focus:border-blue-500"
+                      />
+                    </label>
+
+                    <label className="space-y-1 text-sm">
+                      <span className="text-gray-300">Batas token harian</span>
+                      <input
+                        required
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={packageEditor.daily_token_limit}
+                        onChange={(event) =>
+                          setPackageEditor({ ...packageEditor, daily_token_limit: event.target.value })
+                        }
+                        className="w-full rounded-lg border border-gray-700 bg-black px-3 py-2 text-white outline-none focus:border-blue-500"
+                      />
+                    </label>
+
+                    <label className="space-y-1 text-sm">
+                      <span className="text-gray-300">Durasi (hari)</span>
+                      <input
+                        required
+                        type="number"
+                        min="1"
+                        max="365"
+                        step="1"
+                        value={packageEditor.duration_days}
+                        onChange={(event) =>
+                          setPackageEditor({ ...packageEditor, duration_days: event.target.value })
+                        }
+                        className="w-full rounded-lg border border-gray-700 bg-black px-3 py-2 text-white outline-none focus:border-blue-500"
+                      />
+                    </label>
+
+                    <label className="space-y-1 text-sm">
+                      <span className="text-gray-300">Kapasitas pengguna aktif</span>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={packageEditor.max_users}
+                        onChange={(event) =>
+                          setPackageEditor({ ...packageEditor, max_users: event.target.value })
+                        }
+                        placeholder="Kosong = tidak terbatas"
+                        className="w-full rounded-lg border border-gray-700 bg-black px-3 py-2 text-white outline-none focus:border-blue-500"
+                      />
+                    </label>
+
+                    <label className="space-y-1 text-sm">
+                      <span className="text-gray-300">Urutan tampilan</span>
+                      <input
+                        required
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={packageEditor.sort_order}
+                        onChange={(event) =>
+                          setPackageEditor({ ...packageEditor, sort_order: event.target.value })
+                        }
+                        className="w-full rounded-lg border border-gray-700 bg-black px-3 py-2 text-white outline-none focus:border-blue-500"
+                      />
+                    </label>
+                  </div>
+
+                  <label className="block space-y-1 text-sm">
+                    <span className="text-gray-300">Deskripsi</span>
+                    <textarea
+                      rows={2}
+                      value={packageEditor.description}
+                      onChange={(event) =>
+                        setPackageEditor({ ...packageEditor, description: event.target.value })
+                      }
+                      className="w-full rounded-lg border border-gray-700 bg-black px-3 py-2 text-white outline-none focus:border-blue-500"
+                    />
+                  </label>
+
+                  <label className="flex items-center gap-2 text-sm text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={packageEditor.is_active}
+                      onChange={(event) =>
+                        setPackageEditor({ ...packageEditor, is_active: event.target.checked })
+                      }
+                      className="h-4 w-4 accent-blue-600"
+                    />
+                    Paket aktif
+                  </label>
+
+                  <p className="text-xs text-gray-500">
+                    Kapasitas kosong berarti tidak terbatas. Jika kapasitas dikurangi di bawah jumlah pelanggan aktif, pelanggan lama tetap aktif dan pendaftaran baru akan dibatasi.
+                  </p>
+
+                  <button
+                    type="submit"
+                    disabled={packageBusy}
+                    className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+                  >
+                    {packageBusy ? "Menyimpan..." : "Simpan Paket"}
+                  </button>
+                </form>
+              )}
+
+              {adminPackages.length === 0 ? (
+                <div className="rounded-xl border border-gray-800 bg-gray-900 p-8 text-center text-gray-500">
+                  Belum ada data paket atau data belum berhasil dimuat.
+                </div>
+              ) : (
+                <div className="grid gap-4 md:grid-cols-2">
+                  {adminPackages.map((pkg) => (
+                    <section
+                      key={pkg.id}
+                      className="space-y-3 rounded-xl border border-gray-800 bg-gray-900 p-4"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <h3 className="text-lg font-bold">{pkg.name}</h3>
+                          <p className="text-xs text-gray-500">
+                            Kode: {pkg.code} · Urutan: {pkg.sort_order}
+                          </p>
+                        </div>
+                        <span
+                          className={`rounded-full px-2 py-1 text-xs ${
+                            pkg.is_active
+                              ? "bg-emerald-900/50 text-emerald-300"
+                              : "bg-gray-800 text-gray-400"
+                          }`}
+                        >
+                          {pkg.is_active ? "Aktif" : "Nonaktif"}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div className="rounded-lg bg-black/40 p-3">
+                          <p className="text-xs text-gray-500">Harga</p>
+                          <p className="font-semibold">
+                            {new Intl.NumberFormat("id-ID", {
+                              style: "currency",
+                              currency: "IDR",
+                              maximumFractionDigits: 0,
+                            }).format(pkg.price_idr)}
+                          </p>
+                        </div>
+                        <div className="rounded-lg bg-black/40 p-3">
+                          <p className="text-xs text-gray-500">Token paket</p>
+                          <p className="font-semibold">
+                            {pkg.token_amount.toLocaleString("id-ID")}
+                          </p>
+                        </div>
+                        <div className="rounded-lg bg-black/40 p-3">
+                          <p className="text-xs text-gray-500">Batas harian</p>
+                          <p className="font-semibold">
+                            {pkg.daily_token_limit.toLocaleString("id-ID")}
+                          </p>
+                        </div>
+                        <div className="rounded-lg bg-black/40 p-3">
+                          <p className="text-xs text-gray-500">Durasi</p>
+                          <p className="font-semibold">{pkg.duration_days} hari</p>
+                        </div>
+                        <div className="rounded-lg bg-black/40 p-3">
+                          <p className="text-xs text-gray-500">Pengguna aktif</p>
+                          <p className="font-semibold">
+                            {pkg.active_users.toLocaleString("id-ID")}
+                          </p>
+                        </div>
+                        <div className="rounded-lg bg-black/40 p-3">
+                          <p className="text-xs text-gray-500">Slot tersedia</p>
+                          <p className="font-semibold">
+                            {pkg.max_users === null
+                              ? "Tidak terbatas"
+                              : `${Math.max(0, pkg.available_slots ?? 0)} / ${pkg.max_users}`}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className={pkg.has_qris ? "text-emerald-300" : "text-amber-300"}>
+                          {pkg.has_qris ? "✓ QRIS tersedia" : "⚠ QRIS belum tersedia"}
+                        </span>
+                        {pkg.is_full && (
+                          <span className="text-red-300">Kapasitas penuh</span>
+                        )}
+                      </div>
+
+                      {pkg.qris_image_url && (
+                        <div className="rounded-lg border border-gray-800 bg-black p-3">
+                          <p className="mb-2 text-xs text-gray-400">QRIS saat ini</p>
+                          <img
+                            key={`${pkg.code}-${pkg.qris_image_url}`}
+                            src={`${API_URL}${pkg.qris_image_url}`}
+                            alt={`QRIS ${pkg.name}`}
+                            className="mx-auto max-h-48 w-auto max-w-full object-contain"
+                          />
+                        </div>
+                      )}
+
+                      <div className="space-y-2 border-t border-gray-800 pt-3">
+                        <label className="block text-xs text-gray-400">
+                          Unggah/ganti QRIS (PNG/JPG, maksimal 5 MB)
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg"
+                            disabled={packageBusy}
+                            onChange={(event) =>
+                              setQrisFiles((current) => ({
+                                ...current,
+                                [pkg.code]: event.target.files?.[0] || null,
+                              }))
+                            }
+                            className="mt-2 block w-full text-xs text-gray-300 file:mr-3 file:rounded-lg file:border-0 file:bg-gray-700 file:px-3 file:py-2 file:text-white"
+                          />
+                        </label>
+
+                        {qrisFiles[pkg.code] && (
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="max-w-[65%] truncate text-xs text-gray-400">
+                              {qrisFiles[pkg.code]?.name}
+                            </span>
+                            <button
+                              type="button"
+                              disabled={packageBusy}
+                              onClick={() => uploadPackageQris(pkg.code)}
+                              className="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-600 disabled:opacity-50"
+                            >
+                              {packageBusy ? "Mengunggah..." : "Unggah QRIS"}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap gap-2 border-t border-gray-800 pt-3">
+                        <button
+                          type="button"
+                          onClick={() => openEditPackage(pkg)}
+                          className="rounded-lg border border-blue-600/50 px-3 py-2 text-xs text-blue-300 hover:bg-blue-900/30"
+                        >
+                          ✏️ Edit Paket
+                        </button>
+                        <button
+                          type="button"
+                          disabled={packageBusy}
+                          onClick={() => togglePackage(pkg)}
+                          className={`rounded-lg border px-3 py-2 text-xs disabled:opacity-50 ${
+                            pkg.is_active
+                              ? "border-red-700/50 text-red-300 hover:bg-red-900/30"
+                              : "border-emerald-700/50 text-emerald-300 hover:bg-emerald-900/30"
+                          }`}
+                        >
+                          {pkg.is_active ? "Nonaktifkan" : "Aktifkan"}
+                        </button>
+                      </div>
+                    </section>
+                  ))}
                 </div>
               )}
             </div>

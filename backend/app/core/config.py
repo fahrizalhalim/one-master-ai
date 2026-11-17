@@ -52,3 +52,13 @@ TELEGRAM_WEBHOOK_BASE_URL = _get(
     "TELEGRAM_WEBHOOK_BASE_URL",
     "https://gamalama-mht.my.id",
 ).rstrip("/")
+
+
+# Konfigurasi khusus bot Telegram pusat ONE MASTER AI.
+# Token dan webhook secret diisi melalui environment/.env pada tahap konfigurasi.
+OMAI_TELEGRAM_BOT_TOKEN = _get("OMAI_TELEGRAM_BOT_TOKEN")
+OMAI_TELEGRAM_BOT_USERNAME = _get(
+    "OMAI_TELEGRAM_BOT_USERNAME",
+    "OneMasterAI_Bot",
+).lstrip("@")
+OMAI_TELEGRAM_WEBHOOK_SECRET = _get("OMAI_TELEGRAM_WEBHOOK_SECRET")

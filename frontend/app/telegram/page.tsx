@@ -1,16 +1,18 @@
+
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/app/auth-context";
+import TelegramIcon from "@/app/telegram-icon";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
 type TelegramStatus = {
-  connected: boolean;
-  status: string;
-  bot_username?: string | null;
-  owner_linked?: boolean;
+  bot_username: string | null;
+  linked: boolean;
+  telegram_username: string | null;
+  linked_at: string | null;
 };
 
 export default function TelegramPage() {
@@ -18,26 +20,42 @@ export default function TelegramPage() {
   const router = useRouter();
 
   const [status, setStatus] = useState<TelegramStatus | null>(null);
-  const [botToken, setBotToken] = useState("");
+  const [linkUrl, setLinkUrl] = useState("");
+  const [linkExpiresAt, setLinkExpiresAt] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [activationLink, setActivationLink] = useState("");
 
   const loadStatus = useCallback(async () => {
     if (!token) return;
 
     try {
-      const res = await fetch(`${API_URL}/api/v1/telegram/status`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        `${API_URL}/api/v1/telegram-central/status`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          cache: "no-store",
+        }
+      );
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Gagal membaca status Telegram");
+
+      if (!res.ok) {
+        throw new Error(data.detail || "Gagal membaca status Telegram");
+      }
 
       setStatus(data);
+
+      if (data.linked) {
+        setLinkUrl("");
+        setLinkExpiresAt("");
+      }
+
+      setError("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal membaca status");
+      setError(
+        err instanceof Error ? err.message : "Gagal membaca status Telegram"
+      );
     }
   }, [token]);
 
@@ -49,49 +67,66 @@ export default function TelegramPage() {
     if (token) loadStatus();
   }, [token, loadStatus]);
 
-  async function connectBot(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
+  // Periksa secara berkala apakah pengguna sudah menekan Start di Telegram.
+  useEffect(() => {
+    if (!token || !linkUrl || status?.linked) return;
 
-    if (!botToken.trim() || busy || !token) return;
+    const timer = window.setInterval(() => {
+      loadStatus();
+    }, 5000);
+
+    return () => window.clearInterval(timer);
+  }, [token, linkUrl, status?.linked, loadStatus]);
+
+  async function generateLink() {
+    if (busy || !token) return;
 
     setBusy(true);
     setError("");
     setMessage("");
 
     try {
-      const res = await fetch(`${API_URL}/api/v1/telegram/connect`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ bot_token: botToken.trim() }),
-      });
+      const res = await fetch(
+        `${API_URL}/api/v1/telegram-central/link-code`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
 
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.detail || "Gagal menghubungkan bot");
+        throw new Error(data.detail || "Gagal membuat tautan Telegram");
       }
 
-      setBotToken("");
-      setMessage(data.message || "Bot berhasil didaftarkan.");
-      await loadStatus();
+      setLinkUrl(data.link);
+      setLinkExpiresAt(
+        new Date(
+          Date.now() + Number(data.expires_in_seconds || 900) * 1000
+        ).toISOString()
+      );
+
+      setMessage("Tautan pengaitan berhasil dibuat.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Terjadi kesalahan");
+      setError(
+        err instanceof Error ? err.message : "Terjadi kesalahan"
+      );
     } finally {
       setBusy(false);
     }
   }
 
-  async function disconnectBot() {
+  async function unlinkTelegram() {
     if (busy || !token) return;
 
     const confirmed = window.confirm(
-      "Hapus koneksi Telegram?\n\n" +
-      "Webhook bot akan dilepas dan riwayat update Telegram untuk " +
-      "koneksi ini akan ikut terhapus. Riwayat percakapan AI tidak dihapus.\n\n" +
-      "Bot Token tidak dicabut dari BotFather. Lanjutkan?"
+      "Lepaskan akun Telegram dari ONE MASTER AI?\n\n" +
+      "Tindakan ini hanya melepaskan hubungan akun Telegram Anda " +
+      "dengan akun OM.AI.\n\n" +
+      "Akun OM.AI, riwayat percakapan, pesan, dokumen, dan data lainnya " +
+      "tetap dipertahankan.\n\n" +
+      "Lanjutkan?"
     );
 
     if (!confirmed) return;
@@ -99,58 +134,30 @@ export default function TelegramPage() {
     setBusy(true);
     setError("");
     setMessage("");
-    setActivationLink("");
 
     try {
-      const res = await fetch(`${API_URL}/api/v1/telegram/disconnect`, {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      const res = await fetch(
+        `${API_URL}/api/v1/telegram-central/unlink`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
 
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.detail || "Gagal menghapus koneksi Telegram");
+        throw new Error(data.detail || "Gagal melepas akun Telegram");
       }
 
-      setMessage(data.message || "Koneksi Telegram berhasil dihapus.");
+      setLinkUrl("");
+      setLinkExpiresAt("");
+      setMessage("Akun Telegram berhasil dilepaskan dari OM.AI.");
       await loadStatus();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Terjadi kesalahan");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function activateBot() {
-    if (busy || !token) return;
-
-    setBusy(true);
-    setError("");
-    setMessage("");
-    setActivationLink("");
-
-    try {
-      const res = await fetch(`${API_URL}/api/v1/telegram/activate`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.detail || "Gagal mengaktifkan bot Telegram");
-      }
-
-      setActivationLink(data.link_url || "");
-      setMessage(data.message || "Webhook berhasil diaktifkan.");
-      await loadStatus();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Terjadi kesalahan");
+      setError(
+        err instanceof Error ? err.message : "Terjadi kesalahan"
+      );
     } finally {
       setBusy(false);
     }
@@ -171,76 +178,63 @@ export default function TelegramPage() {
           ← Kembali ke ONE MASTER AI
         </a>
 
-        <h1 className="mt-6 text-2xl font-bold">
-          🤖 Integrasi Telegram
+        <h1 className="mt-6 flex items-center gap-3 text-2xl font-bold">
+          <TelegramIcon size={30} />
+          Integrasi Telegram
         </h1>
+
         <p className="mt-2 text-sm text-gray-400">
-          Hubungkan bot Telegram milik Anda dengan ONE MASTER AI.
+          Hubungkan akun Telegram Anda ke bot pusat ONE MASTER AI.
+          Tidak perlu membuat bot sendiri atau memasukkan Bot Token.
         </p>
 
         <section className="mt-6 rounded-2xl border border-gray-800 bg-gray-900 p-5">
-          <h2 className="font-semibold">Status koneksi</h2>
+          <h2 className="font-semibold">Status pengaitan</h2>
 
-          {status ? (
+          {!status ? (
+            <p className="mt-3 text-sm text-gray-400">
+              Memeriksa status Telegram…
+            </p>
+          ) : status.linked ? (
             <div className="mt-3">
-              <p className={
-                status.status === "active"
-                  ? "font-semibold text-emerald-400"
-                  : status.status === "pending"
-                  ? "font-semibold text-amber-400"
-                  : status.status === "approved"
-                  ? "font-semibold text-blue-400"
-                  : status.status === "rejected"
-                  ? "font-semibold text-red-400"
-                  : "text-gray-400"
-              }>
-                {status.status === "active"
-                  ? "● Aktif"
-                  : status.status === "pending"
-                  ? "● Menunggu persetujuan admin"
-                  : status.status === "approved"
-                  ? "● Disetujui — menunggu aktivasi teknis"
-                  : status.status === "rejected"
-                  ? "● Permintaan ditolak"
-                  : "● Belum terhubung"}
+              <p className="font-semibold text-emerald-400">
+                ● Telegram sudah terhubung
               </p>
 
-              {status.bot_username && (
-                <p className="mt-2 text-sm text-gray-300">
-                  Bot: @{status.bot_username}
-                </p>
-              )}
+              <p className="mt-3 text-sm text-gray-300">
+                Bot pusat:{" "}
+                {status.bot_username ? `@${status.bot_username}` : "Belum dikonfigurasi"}
+              </p>
 
-              {status.status === "pending" && (
-                <p className="mt-2 text-sm text-amber-300">
-                  Token sudah divalidasi dan disimpan. Permintaan sedang menunggu
-                  persetujuan administrator.
-                </p>
-              )}
+              <p className="mt-1 text-sm text-gray-300">
+                Akun Telegram:{" "}
+                {status.telegram_username
+                  ? `@${status.telegram_username}`
+                  : "Terhubung"}
+              </p>
 
-              {status.status === "approved" && (
-                <p className="mt-2 text-sm text-blue-300">
-                  Administrator telah menyetujui pendaftaran bot. Webhook dan
-                  pengaitan akun Telegram masih menunggu aktivasi teknis.
-                </p>
-              )}
-
-              {status.status === "rejected" && (
-                <p className="mt-2 text-sm text-red-300">
-                  Permintaan koneksi bot ini ditolak oleh administrator.
-                </p>
-              )}
-
-              {status.status === "active" && (
-                <p className="mt-2 text-sm text-gray-400">
-                  Pengaitan pemilik: {status.owner_linked ? "Sudah terhubung" : "Belum terhubung"}
+              {status.linked_at && (
+                <p className="mt-1 text-xs text-gray-500">
+                  Terhubung sejak:{" "}
+                  {new Date(status.linked_at).toLocaleString("id-ID")}
                 </p>
               )}
             </div>
           ) : (
-            <p className="mt-3 text-sm text-gray-400">
-              Memeriksa status koneksi…
-            </p>
+            <div className="mt-3">
+              <p className="font-semibold text-amber-400">
+                ● Belum terhubung
+              </p>
+              <p className="mt-2 text-sm text-gray-400">
+                Akun OM.AI Anda belum dikaitkan dengan akun Telegram.
+              </p>
+
+              {status.bot_username && (
+                <p className="mt-2 text-sm text-gray-300">
+                  Bot pusat: @{status.bot_username}
+                </p>
+              )}
+            </div>
           )}
 
           <button
@@ -253,132 +247,93 @@ export default function TelegramPage() {
           </button>
         </section>
 
-        {status && status.status !== "not_connected" && (
+        {status && !status.linked && (
+          <section className="mt-5 rounded-2xl border border-blue-800 bg-gray-900 p-5">
+            <h2 className="font-semibold text-blue-300">
+              Hubungkan akun Telegram
+            </h2>
+
+            <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-relaxed text-gray-400">
+              <li>Buat tautan pengaitan melalui tombol di bawah.</li>
+              <li>Buka tautan tersebut menggunakan aplikasi Telegram.</li>
+              <li>Tekan tombol Start pada bot pusat ONE MASTER AI.</li>
+              <li>Kembali ke halaman ini untuk memeriksa status pengaitan.</li>
+            </ol>
+
+            {!linkUrl ? (
+              <button
+                type="button"
+                onClick={generateLink}
+                disabled={busy}
+                className="mt-5 w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+              >
+                {busy ? "Membuat tautan…" : "Buat Tautan Pengaitan Telegram"}
+              </button>
+            ) : (
+              <div className="mt-5">
+                <a
+                  href={linkUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block rounded-xl bg-blue-600 px-4 py-3 text-center font-semibold text-white hover:bg-blue-500"
+                >
+                  <span className="inline-flex items-center justify-center gap-2">
+                    <TelegramIcon size={20} />
+                    Buka Telegram dan Tekan Start
+                  </span>
+                </a>
+
+                {linkExpiresAt && (
+                  <p className="mt-3 text-xs text-amber-300">
+                    Tautan berlaku sampai sekitar{" "}
+                    {new Date(linkExpiresAt).toLocaleString("id-ID")}.
+                  </p>
+                )}
+
+                <p className="mt-2 text-xs text-gray-500">
+                  Tautan bersifat pribadi. Jangan bagikan kepada orang lain.
+                  Jika kedaluwarsa, buat tautan baru.
+                </p>
+
+                <button
+                  type="button"
+                  onClick={generateLink}
+                  disabled={busy}
+                  className="mt-4 w-full rounded-xl border border-gray-700 px-4 py-3 text-sm font-medium hover:bg-gray-800 disabled:opacity-50"
+                >
+                  {busy ? "Memproses…" : "Buat Tautan Baru"}
+                </button>
+              </div>
+            )}
+          </section>
+        )}
+
+        {status?.linked && (
           <section className="mt-5 rounded-2xl border border-red-900/70 bg-gray-900 p-5">
             <h2 className="font-semibold text-red-300">
-              Hapus koneksi Telegram
+              Lepaskan akun Telegram
             </h2>
 
             <p className="mt-2 text-sm leading-relaxed text-gray-400">
-              Hapus integrasi bot ini dari ONE MASTER AI. Webhook akan dilepas
-              dan riwayat update Telegram pada koneksi ini ikut dihapus.
-              Riwayat percakapan AI tetap tersimpan.
+              Gunakan tindakan ini jika ingin memutus hubungan akun Telegram
+              dari akun OM.AI. Setelah dilepaskan, akun Telegram tersebut
+              tidak lagi dapat menggunakan akun OM.AI ini melalui bot pusat
+              sampai dilakukan pengaitan kembali.
             </p>
 
-            <p className="mt-2 text-xs text-amber-300">
-              Penghapusan koneksi tidak mencabut Bot Token dari BotFather.
-              Untuk mencabut token, lakukan secara terpisah melalui BotFather.
+            <p className="mt-3 text-xs leading-relaxed text-emerald-300">
+              Akun OM.AI, riwayat percakapan, pesan, dokumen, dan data
+              pengguna lainnya tidak dihapus.
             </p>
 
             <button
               type="button"
-              onClick={disconnectBot}
+              onClick={unlinkTelegram}
               disabled={busy}
               className="mt-4 w-full rounded-xl border border-red-700 bg-red-950/50 px-4 py-3 font-semibold text-red-300 hover:bg-red-900/60 disabled:opacity-50"
             >
-              {busy ? "Menghapus koneksi…" : "Hapus Koneksi Telegram"}
+              {busy ? "Memproses…" : "Lepaskan Akun Telegram"}
             </button>
-          </section>
-        )}
-
-        {status?.status === "approved" && (
-          <section className="mt-5 rounded-2xl border border-blue-800 bg-gray-900 p-5">
-            <h2 className="font-semibold text-blue-300">
-              Aktivasi bot Telegram
-            </h2>
-
-            <p className="mt-2 text-sm leading-relaxed text-gray-400">
-              Bot sudah disetujui administrator. Aktifkan webhook agar
-              Telegram dapat mengirim proses pengaitan pemilik ke ONE MASTER AI.
-            </p>
-
-            <button
-              type="button"
-              onClick={activateBot}
-              disabled={busy}
-              className="mt-4 w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold hover:bg-blue-500 disabled:opacity-50"
-            >
-              {busy ? "Mengaktifkan…" : "Aktifkan Bot Telegram"}
-            </button>
-          </section>
-        )}
-
-        {activationLink && (
-          <section className="mt-5 rounded-2xl border border-emerald-800 bg-emerald-950/30 p-5">
-            <h2 className="font-semibold text-emerald-300">
-              Hubungkan akun Telegram Anda
-            </h2>
-
-            <p className="mt-2 text-sm leading-relaxed text-gray-300">
-              Aktivasi webhook berhasil. Buka tautan berikut menggunakan
-              akun Telegram yang ingin dihubungkan, kemudian tekan Start.
-            </p>
-
-            <a
-              href={activationLink}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-4 block break-all rounded-lg border border-emerald-800 bg-gray-950 p-3 text-sm text-emerald-300 underline hover:text-emerald-200"
-            >
-              Buka bot Telegram dan tekan Start
-            </a>
-
-            <p className="mt-3 text-xs text-amber-300">
-              Tautan pengaitan berlaku selama 15 menit. Jangan bagikan tautan
-              ini kepada orang lain.
-            </p>
-
-            <button
-              type="button"
-              onClick={loadStatus}
-              disabled={busy}
-              className="mt-4 rounded-lg border border-gray-700 px-4 py-2 text-sm hover:bg-gray-800 disabled:opacity-50"
-            >
-              Periksa status pengaitan
-            </button>
-          </section>
-        )}
-
-        {(!status || status.status === "not_connected") && (
-          <section className="mt-5 rounded-2xl border border-gray-800 bg-gray-900 p-5">
-            <h2 className="font-semibold">Hubungkan bot baru</h2>
-
-            <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm text-gray-400">
-              <li>Buka Telegram dan cari akun resmi @BotFather.</li>
-              <li>Buat bot baru menggunakan perintah /newbot.</li>
-              <li>Salin Bot Token yang diberikan BotFather.</li>
-              <li>Masukkan token pada formulir di bawah.</li>
-            </ol>
-
-            <form onSubmit={connectBot} className="mt-5 space-y-3">
-              <label className="block text-sm font-medium">
-                Bot Token
-              </label>
-
-              <input
-                type="password"
-                value={botToken}
-                onChange={(e) => setBotToken(e.target.value)}
-                placeholder="Masukkan Bot Token dari BotFather"
-                autoComplete="off"
-                required
-                className="w-full rounded-xl border border-gray-700 bg-gray-950 px-4 py-3 text-sm outline-none focus:border-blue-500"
-              />
-
-              <p className="text-xs text-gray-500">
-                Token dikirim langsung ke backend ONE MASTER AI dan
-                disimpan dalam bentuk terenkripsi. Jangan bagikan token
-                kepada orang lain.
-              </p>
-
-              <button
-                type="submit"
-                disabled={busy || !botToken.trim()}
-                className="w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold hover:bg-blue-500 disabled:opacity-50"
-              >
-                {busy ? "Memproses…" : "Hubungkan Bot Telegram"}
-              </button>
-            </form>
           </section>
         )}
 
@@ -395,9 +350,10 @@ export default function TelegramPage() {
         )}
 
         <p className="mt-6 text-xs leading-relaxed text-gray-500">
-          Catatan: aktivasi memasang webhook dan memungkinkan pengaitan
-          pemilik Telegram. Pemrosesan percakapan AI dan penggunaan kuota
-          melalui Telegram masih merupakan tahap implementasi berikutnya.
+          ONE MASTER AI menggunakan satu bot Telegram pusat untuk seluruh
+          pengguna. Pengaitan dilakukan secara pribadi melalui kode sekali
+          pakai yang berlaku selama 15 menit. Pesan Telegram diproses melalui
+          layanan AI OM.AI dengan identitas akun masing-masing pengguna.
         </p>
       </div>
     </main>

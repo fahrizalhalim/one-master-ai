@@ -105,6 +105,8 @@ class ChatResponse(BaseModel):
     conversation_id: str
     skill: str
     answer: str
+    assistant_message_id: str
+    reservation_id: str | None = None
 
 
 def _get_own_conversation(
@@ -306,6 +308,16 @@ def chat(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    return _chat_impl(data, current_user, db)
+
+
+def _chat_impl(
+    data: ChatRequest,
+    current_user: User,
+    db: Session,
+    *,
+    reservation_reference: str | None = None,
+):
     # Pemeriksaan status akun. Kuota ditangani token_service.
     if current_user.status != "active":
         raise HTTPException(
@@ -375,8 +387,12 @@ def chat(
         db=db,
         user=current_user,
         estimated_tokens=estimated_tokens,
-        reference=f"chat:{conv.id}",
-        description="Chat aplikasi ONE MASTER AI",
+        reference=reservation_reference or f"chat:{conv.id}",
+        description=(
+            "Chat Telegram pusat ONE MASTER AI"
+            if reservation_reference
+            else "Chat aplikasi ONE MASTER AI"
+        ),
     )
 
     # Simpan pesan user setelah reservasi berhasil.
@@ -594,4 +610,6 @@ def chat(
         conversation_id=conv.id,
         skill=result["skill"],
         answer=result["answer"],
+        assistant_message_id=assistant_message.id,
+        reservation_id=reservation.id if reservation is not None else None,
     )

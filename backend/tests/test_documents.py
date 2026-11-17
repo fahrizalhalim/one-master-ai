@@ -127,3 +127,100 @@ def test_invalid_format_rejected():
         headers={"Authorization": f"Bearer {t}"},
     )
     assert r.status_code == 422
+
+
+def test_user_cannot_download_another_users_document():
+    # User A membuat dokumen.
+    token_a = _token()
+
+    generated = client.post(
+        "/api/v1/documents/generate",
+        json={
+            "title": "Dokumen Privat User A",
+            "content": "Isi dokumen khusus User A.",
+            "format": "docx",
+        },
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert generated.status_code == 200, generated.text
+    filename = generated.json()["filename"]
+
+    # Buat atau login User B dengan identitas berbeda.
+    email_b = "doc-other@test.ac.id"
+    password_b = "password123"
+
+    registered = client.post(
+        "/api/v1/auth/register",
+        json={"email": email_b, "password": password_b},
+    )
+
+    if registered.status_code not in (201,):
+        assert registered.status_code in (400, 409), registered.text
+
+    _approve_all()
+
+    login_b = client.post(
+        "/api/v1/auth/login",
+        data={"username": email_b, "password": password_b},
+    )
+    assert login_b.status_code == 200, login_b.text
+    token_b = login_b.json()["access_token"]
+
+    # User A tetap dapat mengunduh dokumennya.
+    download_a = client.get(
+        f"/api/v1/documents/download/{filename}",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert download_a.status_code == 200
+
+    # User B tidak boleh mengunduh dokumen milik User A.
+    download_b = client.get(
+        f"/api/v1/documents/download/{filename}",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert download_b.status_code == 404
+
+
+def test_generated_user_directory_rejects_cross_user_symlink(tmp_path, monkeypatch):
+    from uuid import uuid4
+    from app.services import document_service
+
+    monkeypatch.setattr(document_service, "STORAGE_DIR", tmp_path)
+
+    user_a = str(uuid4())
+    user_b = str(uuid4())
+
+    generated = tmp_path / "generated"
+    generated.mkdir()
+
+    user_b_dir = generated / user_b
+    user_b_dir.mkdir()
+
+    (generated / user_a).symlink_to(user_b_dir, target_is_directory=True)
+
+    try:
+        document_service._user_storage_dir(user_a)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Symlink lintas pengguna seharusnya ditolak.")
+
+
+def test_generated_file_symlink_is_rejected(tmp_path, monkeypatch):
+    from uuid import uuid4
+    from app.services import document_service
+
+    monkeypatch.setattr(document_service, "STORAGE_DIR", tmp_path)
+
+    user_id = str(uuid4())
+    user_dir = document_service._user_storage_dir(user_id)
+
+    real_file = user_dir / "dokumen_asli.docx"
+    real_file.write_bytes(b"PK-test")
+
+    linked_file = user_dir / "dokumen_link.docx"
+    linked_file.symlink_to(real_file)
+
+    assert document_service.resolve_stored_file(
+        "dokumen_link.docx", user_id
+    ) is None

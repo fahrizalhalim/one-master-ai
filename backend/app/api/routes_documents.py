@@ -28,9 +28,9 @@ def generate_document(
 ):
     try:
         if data.format == "pdf":
-            path = create_pdf(data.title, data.content)
+            path = create_pdf(data.title, data.content, current_user.id)
         else:
-            path = create_docx(data.title, data.content)
+            path = create_docx(data.title, data.content, current_user.id)
     except Exception:
         raise HTTPException(
             status_code=500,
@@ -54,7 +54,7 @@ def download_document(
     filename: str,
     current_user: User = Depends(get_current_user),
 ):
-    path = resolve_stored_file(filename)
+    path = resolve_stored_file(filename, current_user.id)
     if path is None:
         raise HTTPException(status_code=404, detail="Dokumen tidak ditemukan.")
 

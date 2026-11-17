@@ -1,9 +1,11 @@
 import asyncio
 import hashlib
+import os
 import secrets
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from cryptography.fernet import Fernet
@@ -32,6 +34,17 @@ from app.models.telegram_account import TelegramAccount
 from app.models.telegram_update import TelegramUpdate
 from app.models.user import User
 from app.api.routes_files import MAX_SIZE, _user_dir, extract_text
+from app.services.storage_service import (
+    calculate_storage_usage,
+    get_storage_policy,
+    user_storage_lock,
+)
+from app.services.workspace_service import (
+    WorkspaceError,
+    _validated_user_dir,
+    find_file_by_id,
+    _unlink_workspace_file,
+)
 from app.services.master_agent import (
     master_agent,
     prepare_master_prompt,
@@ -101,8 +114,10 @@ async def _download_telegram_document(
     token: str,
     document: dict,
     user_id: str,
+    db: Session,
+    replace_file_id: str | None = None,
 ) -> tuple[str, str, str, int]:
-    """Unduh dan simpan dokumen Telegram ke direktori milik user."""
+    """Unduh, periksa kuota, dan simpan file Telegram secara aman."""
     telegram_file_id = document.get("file_id")
     declared_size = document.get("file_size")
     original_name = str(document.get("file_name") or "dokumen")[:120]
@@ -160,25 +175,147 @@ async def _download_telegram_document(
     if total_size == 0:
         raise ValueError("Dokumen yang dikirim kosong.")
 
+    content = b"".join(chunks)
     local_id = secrets.token_hex(6)
     user_dir = _user_dir(user_id)
-    original_path = user_dir / f"{local_id}{ext}"
-    extract_path = user_dir / f"{local_id}.extract.txt"
 
-    try:
-        original_path.write_bytes(b"".join(chunks))
-        extracted = extract_text(original_path, ext) if ext in TEXT_EXTRACT_EXT else ""
-        extract_path.write_text(extracted, encoding="utf-8")
-        (user_dir / f"{local_id}.name.txt").write_text(
-            original_name, encoding="utf-8"
+    with user_storage_lock(user_id):
+        user = db.get(User, user_id)
+        if user is None:
+            raise ValueError("Akun pengguna tidak ditemukan.")
+
+        policy = get_storage_policy(db, user)
+
+        if not policy.get("upload_allowed", True):
+            status = policy.get("status")
+            if status == "upload_locked":
+                raise ValueError(
+                    "Upload terkunci karena masa tenggang paket telah berakhir. "
+                    "File lama tetap dapat diakses."
+                )
+            if status == "purge_due":
+                raise ValueError(
+                    "Masa penyimpanan paket telah berakhir. "
+                    "Silakan lakukan Top Up sebelum mengunggah file."
+                )
+            raise ValueError(
+                "Upload belum diizinkan karena status langganan belum tersedia."
+            )
+
+        if replace_file_id:
+            old_originals = [
+                path for path in user_dir.glob(f"{replace_file_id}.*")
+                if path.is_file()
+                and not path.is_symlink()
+                and not path.name.endswith((".name.txt", ".extract.txt"))
+            ]
+            if len(old_originals) != 1:
+                raise ValueError(
+                    "File lama tidak ditemukan atau identitasnya tidak valid. "
+                    "File lama tidak diubah."
+                )
+
+        used = calculate_storage_usage(
+            user_dir,
+            exclude_file_id=replace_file_id,
         )
-    except Exception:
-        original_path.unlink(missing_ok=True)
-        extract_path.unlink(missing_ok=True)
-        (user_dir / f"{local_id}.name.txt").unlink(missing_ok=True)
-        raise ValueError("File rusak atau tidak dapat dibaca.")
+        quota = policy.get("quota_bytes")
 
-    return local_id, original_name, extracted, total_size
+        if quota is not None and used + total_size > quota:
+            remaining = max(0, quota - used)
+            raise ValueError(
+                "Kuota penyimpanan tidak mencukupi. "
+                f"Sisa kapasitas: {remaining / 1_000_000:.3f} MB; "
+                f"ukuran file baru: {total_size / 1_000_000:.3f} MB."
+            )
+
+        target_id = replace_file_id or local_id
+        stage_original = user_dir / f".stage-{local_id}{ext}"
+        stage_extract = user_dir / f".stage-{local_id}.extract.txt"
+        stage_name = user_dir / f".stage-{local_id}.name.txt"
+
+        staged = [stage_original, stage_extract, stage_name]
+        backups = []
+        installed = []
+
+        try:
+            stage_original.write_bytes(content)
+            extracted = (
+                extract_text(stage_original, ext)
+                if ext in TEXT_EXTRACT_EXT
+                else ""
+            )
+            stage_extract.write_text(extracted, encoding="utf-8")
+            stage_name.write_text(original_name, encoding="utf-8")
+
+            if replace_file_id:
+                old_files = [
+                    path for path in user_dir.glob(f"{replace_file_id}.*")
+                    if path.is_file()
+                ]
+
+                for old_path in old_files:
+                    backup_path = user_dir / (
+                        f".backup-{local_id}-{old_path.name}"
+                    )
+                    os.replace(old_path, backup_path)
+                    backups.append((backup_path, old_path))
+
+            final_files = [
+                (stage_original, user_dir / f"{target_id}{ext}"),
+                (stage_extract, user_dir / f"{target_id}.extract.txt"),
+                (stage_name, user_dir / f"{target_id}.name.txt"),
+            ]
+
+            for staged_path, final_path in final_files:
+                os.replace(staged_path, final_path)
+                installed.append(final_path)
+
+        except Exception as original_error:
+            rollback_errors = []
+
+            for path in installed:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    rollback_errors.append(f"hapus {path.name}: {exc}")
+
+            for backup_path, old_path in reversed(backups):
+                if backup_path.exists():
+                    try:
+                        os.replace(backup_path, old_path)
+                    except OSError as exc:
+                        rollback_errors.append(
+                            f"pulihkan {backup_path.name}: {exc}"
+                        )
+
+            for path in staged:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    rollback_errors.append(f"bersihkan {path.name}: {exc}")
+
+            if rollback_errors:
+                raise ValueError(
+                    "Update gagal dan pemulihan belum sepenuhnya berhasil. "
+                    "Backup yang gagal dipulihkan tetap disimpan; "
+                    "perlu pemeriksaan administrator."
+                ) from original_error
+
+            raise ValueError(
+                "File gagal disimpan atau diperbarui. "
+                "File lama telah dipulihkan."
+            ) from original_error
+
+        # Pembersihan backup dilakukan setelah file baru terpasang.
+        # Kegagalan membersihkan backup tidak membatalkan file baru.
+        for backup_path, _ in backups:
+            try:
+                backup_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return target_id, original_name, extracted, total_size
 
 
 async def _send_telegram_document_checked(
@@ -297,11 +434,51 @@ def telegram_status(
     if account is None:
         return {"connected": False, "status": "not_connected"}
 
+    link_url = None
+
+    # User yang sudah login dapat memperoleh tautan pengaitan.
+    # Jika tautan lama kedaluwarsa, buat kode baru tanpa mengganti webhook.
+    if account.status == "approved" and account.telegram_owner_id is None:
+        now = datetime.utcnow()
+        expired = (
+            account.link_code_expires_at is None
+            or account.link_code_expires_at <= now
+        )
+
+        if expired or not account.link_code_encrypted or not account.link_code_hash:
+            link_code = secrets.token_urlsafe(24)
+            account.link_code_hash = hashlib.sha256(
+                link_code.encode()
+            ).hexdigest()
+            account.link_code_encrypted = get_fernet().encrypt(
+                link_code.encode()
+            ).decode()
+            account.link_code_expires_at = now + timedelta(minutes=15)
+            db.commit()
+        else:
+            try:
+                link_code = get_fernet().decrypt(
+                    account.link_code_encrypted.encode()
+                ).decode()
+            except Exception:
+                link_code = None
+
+        if link_code:
+            link_url = (
+                f"https://t.me/{account.bot_username}?start={link_code}"
+            )
+
     return {
         "connected": account.status == "active",
         "status": account.status,
         "bot_username": account.bot_username,
         "owner_linked": account.telegram_owner_id is not None,
+        "link_url": link_url,
+        "link_expires_at": (
+            account.link_code_expires_at.isoformat()
+            if link_url and account.link_code_expires_at
+            else None
+        ),
     }
 
 
@@ -476,6 +653,155 @@ def connect_telegram_bot(
     }
 
 
+def activate_telegram_account(
+    db: Session,
+    account: TelegramAccount,
+    *,
+    approve_pending: bool = False,
+):
+    """Pasang webhook dan siapkan tautan pengaitan pemilik bot."""
+    if account.status not in ("pending", "approved"):
+        raise HTTPException(
+            status_code=409,
+            detail="Status permohonan Telegram tidak dapat diaktifkan.",
+        )
+
+    if account.status == "pending" and not approve_pending:
+        raise HTTPException(
+            status_code=409,
+            detail="Bot harus disetujui administrator sebelum aktivasi.",
+        )
+
+    if account.telegram_owner_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Pemilik Telegram sudah terhubung.",
+        )
+
+    token = decrypt_bot_token(account)
+    webhook_url = (
+        f"{TELEGRAM_WEBHOOK_BASE_URL}/api/v1/telegram/webhook/{account.id}"
+    )
+
+    try:
+        response = httpx.get(
+            f"https://api.telegram.org/bot{token}/getWebhookInfo",
+            timeout=15.0,
+        )
+        info_data = response.json()
+    except (httpx.RequestError, ValueError):
+        raise HTTPException(
+            status_code=502,
+            detail="Gagal memeriksa webhook Telegram.",
+        )
+
+    if response.status_code != 200 or not info_data.get("ok"):
+        raise HTTPException(
+            status_code=502,
+            detail="Telegram gagal memberikan informasi webhook.",
+        )
+
+    existing_url = (info_data.get("result") or {}).get("url") or ""
+
+    if existing_url and existing_url != webhook_url:
+        # Hanya izinkan migrasi webhook lama dari domain resmi OM.AI
+        # dengan format path webhook UUID yang dikenal.
+        try:
+            old_parts = urlsplit(existing_url)
+            current_parts = urlsplit(TELEGRAM_WEBHOOK_BASE_URL)
+
+            old_path_prefix = "/api/v1/telegram/webhook/"
+            old_id_text = (
+                old_parts.path[len(old_path_prefix):]
+                if old_parts.path.startswith(old_path_prefix)
+                else ""
+            )
+
+            valid_old_uuid = (
+                bool(old_id_text)
+                and "/" not in old_id_text
+                and str(uuid.UUID(old_id_text)) == old_id_text
+            )
+
+            legacy_omai_webhook = (
+                current_parts.scheme == "https"
+                and bool(current_parts.hostname)
+                and old_parts.scheme == "https"
+                and old_parts.hostname == current_parts.hostname
+                and old_parts.port is None
+                and old_parts.username is None
+                and old_parts.password is None
+                and not old_parts.query
+                and not old_parts.fragment
+                and valid_old_uuid
+            )
+        except (ValueError, TypeError):
+            legacy_omai_webhook = False
+
+        if not legacy_omai_webhook:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Bot sudah menggunakan webhook lain. "
+                    "Webhook lama tidak diubah demi keamanan."
+                ),
+            )
+
+    link_code = secrets.token_urlsafe(24)
+    account.link_code_hash = hashlib.sha256(
+        link_code.encode()
+    ).hexdigest()
+    account.link_code_encrypted = get_fernet().encrypt(
+        link_code.encode()
+    ).decode()
+    account.link_code_expires_at = datetime.utcnow() + timedelta(minutes=15)
+    account.last_error = None
+
+    if approve_pending:
+        account.status = "approved"
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Kode pengaitan gagal disimpan.",
+        )
+
+    try:
+        telegram_api(
+            token,
+            "setWebhook",
+            url=webhook_url,
+            secret_token=account.webhook_secret,
+            allowed_updates=["message"],
+            drop_pending_updates=False,
+        )
+    except HTTPException:
+        account.link_code_hash = None
+        account.link_code_encrypted = None
+        account.link_code_expires_at = None
+        account.last_error = "set_webhook_failed"
+
+        if approve_pending:
+            account.status = "pending"
+
+        db.commit()
+        raise
+
+    return {
+        "status": "waiting_for_owner",
+        "bot_username": account.bot_username,
+        "expires_in_seconds": 900,
+        "link_url": f"https://t.me/{account.bot_username}?start={link_code}",
+        "message": (
+            "Webhook berhasil dipasang. Buka tautan bot dan tekan Start "
+            "untuk menghubungkan akun Telegram Anda."
+        ),
+    }
+
+
 @router.post("/activate")
 def activate_telegram(
     current_user: User = Depends(get_current_user),
@@ -500,99 +826,7 @@ def activate_telegram(
             detail="Bot Telegram belum didaftarkan.",
         )
 
-    if account.status != "approved":
-        raise HTTPException(
-            status_code=409,
-            detail="Bot harus disetujui administrator sebelum aktivasi.",
-        )
-
-    if account.telegram_owner_id is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="Pemilik Telegram sudah terhubung.",
-        )
-
-    token = decrypt_bot_token(account)
-    webhook_url = (
-        f"{TELEGRAM_WEBHOOK_BASE_URL}/api/v1/telegram/webhook/{account.id}"
-    )
-
-    # Jangan mengambil alih webhook milik layanan lain.
-    try:
-        response = httpx.get(
-            f"https://api.telegram.org/bot{token}/getWebhookInfo",
-            timeout=15.0,
-        )
-        info_data = response.json()
-    except (httpx.RequestError, ValueError):
-        raise HTTPException(
-            status_code=502,
-            detail="Gagal memeriksa webhook Telegram.",
-        )
-
-    if response.status_code != 200 or not info_data.get("ok"):
-        raise HTTPException(
-            status_code=502,
-            detail="Telegram gagal memberikan informasi webhook.",
-        )
-
-    existing_url = (info_data.get("result") or {}).get("url") or ""
-
-    if existing_url and existing_url != webhook_url:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Bot sudah menggunakan webhook lain. "
-                "Webhook lama tidak diubah demi keamanan."
-            ),
-        )
-
-    # Simpan hash kode lebih dahulu agar webhook tidak menerima
-    # perintah /start sebelum kode pengaitan tersedia di database.
-    link_code = secrets.token_urlsafe(24)
-    link_hash = hashlib.sha256(link_code.encode()).hexdigest()
-
-    account.link_code_hash = link_hash
-    account.link_code_expires_at = datetime.utcnow() + timedelta(minutes=15)
-    account.last_error = None
-
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="Kode pengaitan gagal disimpan. Silakan coba aktivasi kembali.",
-        )
-
-    # Setelah kode tersimpan, baru pasang webhook Telegram.
-    try:
-        telegram_api(
-            token,
-            "setWebhook",
-            url=webhook_url,
-            secret_token=account.webhook_secret,
-            allowed_updates=["message"],
-            drop_pending_updates=False,
-        )
-    except HTTPException:
-        # Bersihkan kode jika pemasangan webhook gagal.
-        account.link_code_hash = None
-        account.link_code_expires_at = None
-        account.last_error = "set_webhook_failed"
-        db.commit()
-        raise
-
-    return {
-        "status": "waiting_for_owner",
-        "bot_username": account.bot_username,
-        "expires_in_seconds": 900,
-        "link_url": f"https://t.me/{account.bot_username}?start={link_code}",
-        "message": (
-            "Webhook berhasil dipasang. Buka tautan bot dan tekan Start "
-            "untuk menghubungkan akun Telegram Anda."
-        ),
-    }
+    return activate_telegram_account(db, account)
 
 
 
@@ -969,6 +1203,7 @@ async def telegram_webhook(
                 )
 
                 locked_account.link_code_hash = None
+                locked_account.link_code_encrypted = None
                 locked_account.link_code_expires_at = None
                 locked_account.status = "active"
                 locked_account.last_error = None
@@ -1123,12 +1358,34 @@ async def telegram_webhook(
             db.commit()
             return {"ok": True, "command": "delete", "sent": sent}
 
-        user_dir = _user_dir(user.id)
-        targets = [p for p in user_dir.glob(f"{file_id}.*") if p.is_file()]
-        for p in targets:
-            p.unlink(missing_ok=True)
+        with user_storage_lock(user.id):
+            try:
+                original = find_file_by_id(user.id, file_id)
+                user_dir = _validated_user_dir(user.id)
+            except WorkspaceError:
+                original = None
 
-        reply = "File berhasil dihapus." if targets else "File tidak ditemukan di akun Anda."
+            if original is None:
+                reply = (
+                    "File tidak ditemukan atau ID file tidak dapat "
+                    "dipastikan. Periksa kembali perintah /files."
+                )
+            else:
+                targets = [
+                    original.parent / f"{file_id}.extract.txt",
+                    original.parent / f"{file_id}.name.txt",
+                    original,
+                ]
+
+                try:
+                    for target in targets:
+                        _unlink_workspace_file(user_dir, target)
+                    reply = "File berhasil dihapus."
+                except OSError:
+                    reply = (
+                        "Penghapusan file tidak selesai dengan aman. "
+                        "Silakan hubungi administrator."
+                    )
         token = decrypt_bot_token(account)
         sent = await _send_telegram_message_checked(token, chat_id, reply)
         update.status = "completed" if sent else "failed"
@@ -1165,8 +1422,10 @@ async def telegram_webhook(
                 token=token,
                 document=media,
                 user_id=user.id,
+                db=db,
+                replace_file_id=file_id,
             )
-        except (ValueError, httpx.RequestError):
+        except (ValueError, httpx.RequestError) as exc:
             update.status = "failed"
             update.error_code = "telegram_document_download_failed"
             update.completed_at = datetime.utcnow()
@@ -1174,24 +1433,17 @@ async def telegram_webhook(
             await _send_telegram_message_checked(
                 token,
                 chat_id,
-                "File gagal diproses. Pastikan ukurannya maksimal 5 MB.",
+                (
+                    str(exc)
+                    if isinstance(exc, ValueError)
+                    else "File gagal diunduh dari Telegram. Silakan coba lagi."
+                ),
             )
             return {"ok": True, "status": "update_failed"}
 
-        user_dir = _user_dir(user.id)
-        for p in list(user_dir.glob(f"{file_id}.*")):
-            p.unlink(missing_ok=True)
-
-        renamed = 0
-        for p in list(user_dir.glob(f"{new_id}.*")):
-            suffix = p.name[len(new_id):]
-            p.rename(user_dir / f"{file_id}{suffix}")
-            renamed += 1
-
         reply = (
-            f"File {file_id} berhasil diperbarui ({original_name}, {file_size} byte)."
-            if renamed
-            else "Gagal memperbarui file."
+            f"File {new_id} berhasil diperbarui "
+            f"({original_name}, {file_size} byte)."
         )
         sent = await _send_telegram_message_checked(token, chat_id, reply)
         update.status = "completed" if sent else "failed"
@@ -1211,9 +1463,10 @@ async def telegram_webhook(
                     token=token,
                     document=media,
                     user_id=user.id,
+                    db=db,
                 )
             )
-        except (ValueError, httpx.RequestError):
+        except (ValueError, httpx.RequestError) as exc:
             update.status = "failed"
             update.error_code = "telegram_document_download_failed"
             update.completed_at = datetime.utcnow()
@@ -1221,7 +1474,11 @@ async def telegram_webhook(
             await _send_telegram_message_checked(
                 token,
                 chat_id,
-                "File gagal diproses. Pastikan ukurannya maksimal 5 MB.",
+                (
+                    str(exc)
+                    if isinstance(exc, ValueError)
+                    else "File gagal diunduh dari Telegram. Silakan coba lagi."
+                ),
             )
             return {"ok": True, "status": "document_failed"}
 

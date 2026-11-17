@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/app/auth-context";
 import UploadButton, { type AttachedFile } from "@/app/upload-button";
 import { useConversations } from "@/app/use-conversations";
+import TelegramIcon from "@/app/telegram-icon";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -51,10 +52,152 @@ function PackageStatus({ user }: { user: {
   const detail = `${user.package_days_remaining ?? 1} hari tersisa`;
 
   return (
-    <p className="shrink-0 truncate text-xs font-bold text-gray-200" title={`Paket ${name} · ${detail}`}>
-      <span className="mr-1 inline-block text-[1.5em] leading-none align-middle">{info.icon}</span>
-      Paket {name} · {detail}
-    </p>
+    <div className="min-w-0" title={`Paket ${name} · ${detail}`}>
+      <p className="truncate text-xs font-bold text-gray-200">
+        <span className="mr-1 inline-block text-[1.5em] leading-none align-middle">{info.icon}</span>
+        Paket {name}
+      </p>
+      <p className="mt-1 text-right text-xs font-medium text-emerald-400">
+        {detail}
+      </p>
+    </div>
+  );
+}
+
+
+type StorageInfo = {
+  status: string;
+  eligible: boolean;
+  package_code: string | null;
+  used_bytes: number;
+  used_mb: number;
+  quota_bytes: number | null;
+  quota_mb: number | null;
+  remaining_mb: number | null;
+  upload_allowed: boolean;
+  purge_due: boolean;
+};
+
+function StoragePanel({ token }: { token: string }) {
+  const [storage, setStorage] = useState<StorageInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/v1/files/storage`, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error("Storage tidak tersedia");
+      setStorage(await res.json());
+    } catch {
+      setStorage(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    refresh();
+    const handler = () => refresh();
+    window.addEventListener("oma-storage-updated", handler);
+    return () => window.removeEventListener("oma-storage-updated", handler);
+  }, [refresh]);
+
+  const usedPercent =
+    storage?.quota_bytes && storage.quota_bytes > 0
+      ? Math.min(100, (storage.used_bytes / storage.quota_bytes) * 100)
+      : 0;
+
+  const packageNames: Record<string, string> = {
+    starter: "Starter",
+    regular: "Reguler",
+    professional: "Profesional",
+    business: "Bisnis",
+    basic: "Starter",
+    pro: "Reguler",
+    premium: "Profesional",
+  };
+
+  const statusLabels: Record<string, string> = {
+    active: "Paket aktif",
+    grace: "Masa tenggang 7 hari",
+    upload_locked: "Upload dikunci",
+    purge_due: "Masa penyimpanan berakhir",
+    exempt: "Dikecualikan dari batas storage baru",
+    not_eligible: "Belum dikenai kuota paket baru",
+    subscription_unavailable: "Status paket perlu diperiksa",
+  };
+
+  return (
+    <div className="mb-3 rounded-xl border border-gray-800 bg-black/60 p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <p className="text-xs font-semibold text-gray-300">
+          Penyimpanan Dokumen
+        </p>
+        <span className="text-xs text-gray-400">Storage</span>
+      </div>
+
+      {loading ? (
+        <p className="text-xs text-gray-500">Memuat informasi penyimpanan…</p>
+      ) : !storage ? (
+        <p className="text-xs text-gray-500">
+          Informasi storage belum tersedia.
+        </p>
+      ) : (
+        <>
+          <div className="flex items-center justify-between gap-2 text-xs">
+            <span className="text-gray-400">Terpakai</span>
+            <span className="font-medium text-gray-200">
+              {storage.used_mb.toFixed(2)} MB
+              {storage.quota_mb !== null
+                ? ` / ${storage.quota_mb} MB`
+                : " · Tanpa batas baru"}
+            </span>
+          </div>
+
+          {storage.quota_bytes !== null ? (
+            <>
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-800">
+                <div
+                  className="h-full rounded-full bg-emerald-500 transition-all"
+                  style={{ width: `${usedPercent}%` }}
+                />
+              </div>
+              <div className="mt-2 flex justify-between gap-2 text-xs">
+                <span className="text-gray-400">Sisa storage</span>
+                <span className="text-emerald-300">
+                  {Math.max(0, storage.remaining_mb ?? 0).toFixed(2)} MB
+                </span>
+              </div>
+              {storage.package_code && (
+                <p className="mt-1 text-xs text-gray-500">
+                  Paket {packageNames[storage.package_code] || storage.package_code}
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="mt-1 text-xs text-gray-400">
+              Tidak ada batas storage paket baru yang diterapkan.
+            </p>
+          )}
+
+          <p
+            className={`mt-2 border-t border-gray-800 pt-2 text-xs ${
+              storage.upload_allowed ? "text-emerald-400" : "text-amber-400"
+            }`}
+          >
+            {statusLabels[storage.status] || storage.status}
+          </p>
+
+          {!storage.upload_allowed && (
+            <p className="mt-1 text-xs text-gray-500">
+              File lama tetap dapat diakses dan diunduh.
+            </p>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -388,9 +531,12 @@ export default function Home() {
               </div>
             )}
 
+            <StoragePanel token={token} />
+
             <div className="flex flex-col gap-2">
-              <a href="/telegram" className="rounded-lg border border-gray-800 px-3 py-2 text-center text-sm text-gray-300 transition hover:bg-gray-800">
-                🤖 Integrasi Telegram
+              <a href="/telegram" className="flex items-center justify-center gap-2 rounded-lg border border-gray-800 px-3 py-2 text-sm text-gray-300 transition hover:bg-gray-800">
+                <TelegramIcon size={18} />
+                Integrasi Telegram
               </a>
               {user.role !== "admin" && (
                 <a href="/topup" className="rounded-lg border border-gray-800 px-3 py-2 text-center text-sm text-gray-300 transition hover:bg-gray-800">

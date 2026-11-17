@@ -1,10 +1,25 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
 export type AttachedFile = { id: string; filename: string; chars: number };
+
+type StorageInfo = {
+  status: string;
+  eligible: boolean;
+  package_code: string | null;
+  used_bytes: number;
+  used_mb: number;
+  quota_bytes: number | null;
+  quota_mb: number | null;
+  remaining_bytes: number | null;
+  remaining_mb: number | null;
+  upload_allowed: boolean;
+  purge_due: boolean;
+};
+
 
 /**
  * Tombol 📎 upload file (DOCX/PDF/TXT/MD) → dikirim ke backend →
@@ -24,6 +39,32 @@ export default function UploadButton({
   const inputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [storage, setStorage] = useState<StorageInfo | null>(null);
+  const [storageLoading, setStorageLoading] = useState(true);
+
+  const refreshStorage = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/v1/files/storage`, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        throw new Error("Informasi storage belum dapat dimuat.");
+      }
+
+      const data = await res.json();
+      setStorage(data);
+    } catch {
+      setStorage(null);
+    } finally {
+      setStorageLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    refreshStorage();
+  }, [refreshStorage]);
 
   async function upload(file: File) {
     setBusy(true);
@@ -43,6 +84,8 @@ export default function UploadButton({
         filename: data.filename,
         chars: data.chars,
       });
+      await refreshStorage();
+      window.dispatchEvent(new Event("oma-storage-updated"));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Upload gagal");
     } finally {
@@ -51,8 +94,28 @@ export default function UploadButton({
     }
   }
 
+  const usedPercent =
+    storage?.quota_bytes && storage.quota_bytes > 0
+      ? Math.min(100, (storage.used_bytes / storage.quota_bytes) * 100)
+      : 0;
+
+  const packageName = storage?.package_code
+    ? storage.package_code.charAt(0).toUpperCase() +
+      storage.package_code.slice(1)
+    : null;
+
+  const statusLabel: Record<string, string> = {
+    active: "Paket aktif",
+    grace: "Masa tenggang 7 hari",
+    upload_locked: "Upload dikunci",
+    purge_due: "Masa penyimpanan berakhir",
+    exempt: "Tidak terkena batas storage baru",
+    not_eligible: "Belum dikenai kuota paket baru",
+    subscription_unavailable: "Status paket perlu diperiksa",
+  };
+
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2">
         <input
           ref={inputRef}
@@ -63,7 +126,7 @@ export default function UploadButton({
         />
         <button
           onClick={() => inputRef.current?.click()}
-          disabled={busy || attached !== null}
+          disabled={busy || attached !== null || storage?.upload_allowed === false}
           className="rounded-xl border border-gray-700 px-3 py-2 text-gray-300 hover:bg-gray-800 disabled:opacity-40"
           title="Lampirkan dokumen (DOCX/PDF/TXT/MD, maks 5MB)"
         >

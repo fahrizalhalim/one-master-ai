@@ -3,14 +3,18 @@
 import secrets
 import uuid
 from datetime import datetime
-from typing import Literal
 from pathlib import Path
-
+from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException
-from app.core.config import TELEGRAM_WEBHOOK_BASE_URL
-from app.api.routes_telegram import decrypt_bot_token, telegram_api
+from app.core.config import (
+    TELEGRAM_WEBHOOK_BASE_URL,
+    OMAI_TELEGRAM_BOT_TOKEN,
+    OMAI_TELEGRAM_BOT_USERNAME,
+    OMAI_TELEGRAM_WEBHOOK_SECRET,
+)
+from app.services.telegram_client import telegram_api
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
@@ -21,7 +25,8 @@ from app.models.token_reservation import TokenReservation
 from app.models.token_reservation_result import TokenReservationResult
 from app.models.subscription import TokenWallet, TokenTransaction
 from app.models.user import User
-from app.models.telegram_account import TelegramAccount
+from app.models.telegram_central_update import TelegramCentralUpdate
+from app.models.telegram_central_link import TelegramCentralLink
 from app.services.master_agent import SKILLS_DIR
 from app.services.auth_service import hash_password, verify_password
 from app.services.quota_service import daily_token_usage
@@ -808,234 +813,393 @@ def read_skill(
     }
 
 
-# ---------- Persetujuan koneksi Telegram ----------
-
-class TelegramDecisionRequest(BaseModel):
-    decision: Literal["approve", "reject"]
+# ---------- Monitoring & Recovery Telegram Central ----------
 
 
-class TelegramStatusRequest(BaseModel):
-    is_active: bool
-    admin_password: str
 
-
-class TelegramDisconnectRequest(BaseModel):
-    admin_password: str
-
-
-@router.get("/telegram/pending")
-def list_pending_telegram(
+@router.get("/telegram-central/users")
+def telegram_central_users(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """Daftar bot Telegram yang menunggu persetujuan admin."""
+    """Daftar akun OM.AI yang memiliki identitas Telegram terhubung."""
+
     rows = (
-        db.query(TelegramAccount, User)
-        .join(User, TelegramAccount.user_id == User.id)
-        .filter(TelegramAccount.status == "pending")
-        .order_by(TelegramAccount.created_at.asc())
+        db.query(
+            TelegramCentralLink,
+            User.email,
+            User.full_name,
+            User.status,
+            User.is_active,
+        )
+        .join(User, User.id == TelegramCentralLink.user_id)
+        .filter(TelegramCentralLink.telegram_user_id.isnot(None))
+        .order_by(
+            TelegramCentralLink.linked_at.desc().nullslast(),
+            TelegramCentralLink.created_at.desc(),
+        )
         .all()
     )
 
-    return [
-        {
-            "id": account.id,
-            "user_id": account.user_id,
-            "bot_username": account.bot_username,
-            "status": account.status,
-            "created_at": account.created_at.isoformat(),
-            "user_name": user.full_name or "",
-            "user_email": user.email,
-        }
-        for account, user in rows
-    ]
+    return {
+        "items": [
+            {
+                "user_id": link.user_id,
+                "email": email,
+                "full_name": full_name,
+                "telegram_user_id": link.telegram_user_id,
+                "telegram_username": link.telegram_username,
+                "link_is_active": link.is_active,
+                "user_status": user_status,
+                "user_is_active": user_is_active,
+                "linked_at": (
+                    link.linked_at.isoformat()
+                    if link.linked_at else None
+                ),
+            }
+            for (
+                link,
+                email,
+                full_name,
+                user_status,
+                user_is_active,
+            ) in rows
+        ],
+        "count": len(rows),
+    }
 
-
-@router.post("/telegram/{account_id}/decision")
-def decide_telegram(
-    account_id: str,
-    data: TelegramDecisionRequest,
+@router.get("/telegram-central/review")
+def telegram_central_review(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """Setujui atau tolak permintaan koneksi bot Telegram."""
-    account = db.get(TelegramAccount, account_id)
+    """Daftar pengiriman Telegram Central yang perlu diperiksa Admin."""
 
-    if account is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Permintaan koneksi Telegram tidak ditemukan.",
+    rows = (
+        db.query(
+            TelegramCentralUpdate,
+            User.email,
+            User.full_name,
         )
-
-    if account.status != "pending":
-        raise HTTPException(
-            status_code=409,
-            detail="Permintaan Telegram sudah diproses sebelumnya.",
+        .outerjoin(User, User.id == TelegramCentralUpdate.user_id)
+        .filter(
+            or_(
+                and_(
+                    TelegramCentralUpdate.status == "needs_review",
+                    TelegramCentralUpdate.error_code.in_([
+                        "chat_result_uncertain",
+                        "chat_processing_uncertain",
+                        "telegram_delivery_uncertain",
+                    ]),
+                ),
+                and_(
+                    TelegramCentralUpdate.status == "reply_pending",
+                    TelegramCentralUpdate.error_code == "telegram_send_failed",
+                ),
+                and_(
+                    TelegramCentralUpdate.status == "processing",
+                    TelegramCentralUpdate.error_code == "admin_delivery_in_progress",
+                ),
+            )
         )
-
-    account.status = (
-        "approved" if data.decision == "approve" else "rejected"
+        .order_by(TelegramCentralUpdate.created_at.desc())
+        .limit(100)
+        .all()
     )
 
-    db.commit()
-    db.refresh(account)
-
     return {
-        "id": account.id,
-        "bot_username": account.bot_username,
-        "status": account.status,
-        "message": (
-            "Koneksi bot disetujui. Aktivasi webhook dan linking "
-            "masih merupakan tahap teknis terpisah."
-            if data.decision == "approve"
-            else "Permintaan koneksi bot ditolak."
-        ),
+        "items": [
+            {
+                "update_id": item.update_id,
+                "user_id": item.user_id,
+                "email": email,
+                "full_name": full_name,
+                "telegram_user_id": item.telegram_user_id,
+                "status": item.status,
+                "error_code": item.error_code,
+                "created_at": (
+                    item.created_at.isoformat()
+                    if item.created_at else None
+                ),
+                "updated_at": (
+                    item.updated_at.isoformat()
+                    if item.updated_at else None
+                ),
+            }
+            for item, email, full_name in rows
+        ],
+        "count": len(rows),
     }
 
 
-# ---------- Pengelolaan Telegram Tertaut ----------
-
-@router.get("/telegram/linked")
-def list_linked_telegram(
+@router.post("/telegram-central/{update_id}/retry-delivery")
+async def retry_telegram_central_delivery(
+    update_id: int,
+    data: AdminPasswordRequest,
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """Daftar akun Telegram yang sudah tertaut ke pemiliknya."""
-    rows = (
-        db.query(TelegramAccount, User)
-        .join(User, TelegramAccount.user_id == User.id)
-        .filter(TelegramAccount.telegram_owner_id.isnot(None))
-        .order_by(TelegramAccount.created_at.desc())
-        .all()
-    )
-
-    return [
-        {
-            "id": account.id,
-            "user_id": account.user_id,
-            "user_email": user.email,
-            "user_name": user.full_name or "",
-            "telegram_username": account.telegram_owner_username,
-            "telegram_id": str(account.telegram_owner_id),
-            "bot_username": account.bot_username,
-            "status": account.status,
-            "created_at": account.created_at.isoformat(),
-        }
-        for account, user in rows
-    ]
-
-
-@router.patch("/telegram/{account_id}/status")
-def set_linked_telegram_status(
-    account_id: str,
-    data: TelegramStatusRequest,
-    admin: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    """Aktifkan atau nonaktifkan webhook akun Telegram tertaut."""
+    """
+    Kirim ulang jawaban tersimpan setelah verifikasi Admin.
+    Tidak menjalankan AI dan tidak melakukan settlement token ulang.
+    """
     verify_admin_password(admin, data.admin_password)
 
-    account = db.get(TelegramAccount, account_id)
-    if account is None or account.telegram_owner_id is None:
+    # Import lokal menghindari ketergantungan import silang saat startup.
+    from app.api.routes_telegram_central import (
+        _acquire_delivery_lock,
+        _release_delivery_lock,
+        _deliver_saved_reply_locked,
+        _delivery_lock_key,
+    )
+
+    connection = _acquire_delivery_lock(update_id)
+    if connection is None:
         raise HTTPException(
-            status_code=404,
-            detail="Akun Telegram tertaut tidak ditemukan.",
+            status_code=409,
+            detail="Pengiriman sedang diproses oleh proses lain. Coba periksa kembali.",
         )
 
-    if data.is_active:
-        if account.status == "active":
+    connection.info["telegram_central_delivery_lock_key"] = (
+        _delivery_lock_key(update_id)
+    )
+
+    try:
+        update = (
+            db.query(TelegramCentralUpdate)
+            .filter(TelegramCentralUpdate.update_id == update_id)
+            .with_for_update()
+            .first()
+        )
+
+        if update is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Update Telegram Central tidak ditemukan.",
+            )
+
+        allowed_review = (
+            update.status == "needs_review"
+            and update.error_code in {
+                "chat_result_uncertain",
+                "chat_processing_uncertain",
+            }
+        )
+        allowed_send_retry = (
+            update.status == "reply_pending"
+            and update.error_code == "telegram_send_failed"
+        )
+
+        if not (allowed_review or allowed_send_retry):
             raise HTTPException(
                 status_code=409,
-                detail="Akun Telegram sudah aktif.",
+                detail=(
+                    "Status atau jenis error tidak memenuhi syarat "
+                    "pemulihan otomatis. Periksa kasus ini secara manual."
+                ),
             )
-        if account.status != "disabled":
+
+        if (
+            not isinstance(update.telegram_user_id, int)
+            or isinstance(update.telegram_user_id, bool)
+            or update.telegram_user_id <= 0
+        ):
             raise HTTPException(
                 status_code=409,
-                detail="Hanya akun Telegram nonaktif yang dapat diaktifkan kembali.",
+                detail="Telegram user ID tidak valid.",
             )
 
-        token = decrypt_bot_token(account)
-        webhook_url = (
-            f"{TELEGRAM_WEBHOOK_BASE_URL}/api/v1/telegram/webhook/{account.id}"
-        )
-
-        telegram_api(
-            token,
-            "setWebhook",
-            url=webhook_url,
-            secret_token=account.webhook_secret,
-            allowed_updates=["message"],
-            drop_pending_updates=False,
-        )
-
-        account.status = "active"
-        account.last_error = None
+        # Transisi dilakukan setelah Admin mengotorisasi retry.
+        # Fungsi delivery tetap memeriksa seluruh bukti sebelum mengirim.
+        # Status processing mencegah webhook duplikat mengirim ulang.
+        # Jika proses terhenti, kasus tetap terlihat untuk pemeriksaan manual.
+        update.status = "processing"
+        update.error_code = "admin_delivery_in_progress"
         db.commit()
 
-        return {"detail": "Koneksi Telegram berhasil diaktifkan."}
-
-    if account.status == "disabled":
-        raise HTTPException(
-            status_code=409,
-            detail="Akun Telegram sudah nonaktif.",
-        )
-    if account.status != "active":
-        raise HTTPException(
-            status_code=409,
-            detail="Status akun Telegram tidak dapat dinonaktifkan dari kondisi ini.",
+        sent = await _deliver_saved_reply_locked(
+            db,
+            update,
+            update.telegram_user_id,
         )
 
-    token = decrypt_bot_token(account)
+        db.expire(update)
+        db.refresh(update)
 
-    # Hapus webhook terlebih dahulu. Jika gagal, status lokal tidak berubah.
-    telegram_api(
-        token,
-        "deleteWebhook",
-        drop_pending_updates=False,
+        return {
+            "ok": sent,
+            "update_id": update.update_id,
+            "status": update.status,
+            "error_code": update.error_code,
+            "detail": (
+                "Jawaban berhasil dikirim."
+                if sent
+                else "Jawaban belum berhasil dikirim. Periksa status dan error_code."
+            ),
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        _release_delivery_lock(connection)
+
+@router.get("/telegram-central/webhook-info")
+def get_telegram_central_webhook_info(
+    admin: User = Depends(require_admin),
+):
+    if not OMAI_TELEGRAM_BOT_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Token bot Telegram Pusat belum dikonfigurasi.",
+        )
+
+    if not OMAI_TELEGRAM_BOT_USERNAME:
+        raise HTTPException(
+            status_code=503,
+            detail="Username bot Telegram Pusat belum dikonfigurasi.",
+        )
+
+    # Verifikasi identitas bot sebelum membaca webhook.
+    bot = telegram_api(
+        OMAI_TELEGRAM_BOT_TOKEN,
+        "getMe",
     )
 
-    account.status = "disabled"
-    account.link_code_hash = None
-    account.link_code_expires_at = None
-    db.commit()
+    actual_username = (bot.get("username") or "").lstrip("@")
+    expected_username = OMAI_TELEGRAM_BOT_USERNAME.lstrip("@")
 
-    return {"detail": "Koneksi Telegram berhasil dinonaktifkan."}
+    if actual_username.lower() != expected_username.lower():
+        raise HTTPException(
+            status_code=409,
+            detail="Identitas bot tidak sesuai konfigurasi.",
+        )
+
+    info = telegram_api(
+        OMAI_TELEGRAM_BOT_TOKEN,
+        "getWebhookInfo",
+    )
+
+    return {
+        "ok": True,
+        "bot_username": actual_username,
+        "webhook_url": info.get("url") or None,
+        "pending_update_count": info.get("pending_update_count", 0),
+        "last_error_date": info.get("last_error_date"),
+        "last_error_message": info.get("last_error_message"),
+        "max_connections": info.get("max_connections"),
+        "allowed_updates": info.get("allowed_updates", []),
+    }
 
 
-@router.delete("/telegram/{account_id}")
-def disconnect_linked_telegram(
-    account_id: str,
-    data: TelegramDisconnectRequest,
+@router.post("/telegram-central/set-webhook")
+def set_telegram_central_webhook(
+    data: AdminPasswordRequest,
     admin: User = Depends(require_admin),
-    db: Session = Depends(get_db),
 ):
-    """Putuskan koneksi Telegram tanpa menghapus akun atau percakapan pengguna."""
+    """Pasang webhook bot pusat setelah verifikasi identitas dan password Admin."""
+
     verify_admin_password(admin, data.admin_password)
 
-    account = db.get(TelegramAccount, account_id)
-    if account is None:
+    if not OMAI_TELEGRAM_BOT_TOKEN:
         raise HTTPException(
-            status_code=404,
-            detail="Koneksi Telegram tidak ditemukan.",
+            status_code=503,
+            detail="Token bot Telegram Pusat belum dikonfigurasi.",
         )
 
-    if account.telegram_owner_id is None:
+    if not OMAI_TELEGRAM_BOT_USERNAME:
+        raise HTTPException(
+            status_code=503,
+            detail="Username bot Telegram Pusat belum dikonfigurasi.",
+        )
+
+    if not OMAI_TELEGRAM_WEBHOOK_SECRET:
+        raise HTTPException(
+            status_code=503,
+            detail="Webhook secret Telegram Pusat belum dikonfigurasi.",
+        )
+
+    # Batasi pemasangan hanya pada domain resmi OM.AI.
+    base = urlsplit(TELEGRAM_WEBHOOK_BASE_URL)
+
+    if (
+        base.scheme != "https"
+        or base.hostname != "gamalama-mht.my.id"
+        or base.port is not None
+        or base.username is not None
+        or base.password is not None
+        or base.path not in ("", "/")
+        or base.query
+        or base.fragment
+    ):
         raise HTTPException(
             status_code=409,
-            detail="Akun Telegram ini belum tertaut ke pemilik.",
+            detail="URL dasar webhook tidak sesuai domain resmi OM.AI.",
         )
 
-    token = decrypt_bot_token(account)
+    expected_url = (
+        "https://gamalama-mht.my.id/api/v1/telegram-central/webhook"
+    )
 
-    # Jangan hapus data lokal sebelum Telegram mengonfirmasi pelepasan webhook.
+    # Pastikan token benar-benar milik bot pusat.
+    bot = telegram_api(OMAI_TELEGRAM_BOT_TOKEN, "getMe")
+
+    actual_username = (bot.get("username") or "").lstrip("@")
+    expected_username = OMAI_TELEGRAM_BOT_USERNAME.lstrip("@")
+
+    if actual_username.lower() != expected_username.lower():
+        raise HTTPException(
+            status_code=409,
+            detail="Identitas bot tidak sesuai konfigurasi.",
+        )
+
+    # Periksa webhook aktif sebelum melakukan perubahan.
+    info = telegram_api(
+        OMAI_TELEGRAM_BOT_TOKEN,
+        "getWebhookInfo",
+    )
+
+    existing_url = info.get("url") or ""
+
+    if existing_url and existing_url != expected_url:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Bot sudah memiliki webhook dengan URL berbeda. "
+                "Pemasangan dibatalkan agar webhook lama tidak tertimpa."
+            ),
+        )
+
+    # Pasang webhook tanpa membuang antrean update.
     telegram_api(
-        token,
-        "deleteWebhook",
+        OMAI_TELEGRAM_BOT_TOKEN,
+        "setWebhook",
+        url=expected_url,
+        secret_token=OMAI_TELEGRAM_WEBHOOK_SECRET,
+        allowed_updates=["message"],
         drop_pending_updates=False,
     )
 
-    db.delete(account)
-    db.commit()
+    # Periksa kembali hasil pemasangan.
+    verified = telegram_api(
+        OMAI_TELEGRAM_BOT_TOKEN,
+        "getWebhookInfo",
+    )
 
-    return {"detail": "Koneksi Telegram berhasil diputuskan."}
+    if (verified.get("url") or "") != expected_url:
+        raise HTTPException(
+            status_code=502,
+            detail="Telegram belum mengonfirmasi URL webhook yang diharapkan.",
+        )
 
+    return {
+        "ok": True,
+        "bot_username": actual_username,
+        "webhook_url": verified.get("url"),
+        "pending_update_count": verified.get("pending_update_count", 0),
+        "allowed_updates": verified.get("allowed_updates", []),
+        "message": "Webhook Telegram Pusat berhasil dipasang dan diverifikasi.",
+    }

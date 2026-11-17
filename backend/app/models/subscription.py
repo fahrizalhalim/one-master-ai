@@ -28,8 +28,18 @@ class SubscriptionPlan(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     price_idr: Mapped[int] = mapped_column(BigInteger, default=0)
+    token_amount: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
     daily_token_limit: Mapped[int] = mapped_column(BigInteger, nullable=False)
     duration_days: Mapped[int] = mapped_column(Integer, default=30)
+    max_users: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, default=None
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    qris_image: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, default=None
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()

@@ -11,6 +11,7 @@ _TEST_DB = _TEST_DIR / "pytest.db"
 
 # Paksa override, bukan setdefault.
 os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB}"
+os.environ["DOC_STORAGE"] = str(_TEST_DIR / "storage")
 os.environ.setdefault("OPENAI_API_KEY", "test-key-dummy")
 
 if not os.environ["DATABASE_URL"].startswith("sqlite:///"):

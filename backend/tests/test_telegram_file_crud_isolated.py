@@ -1,3 +1,4 @@
+import shutil
 import os
 import tempfile
 import uuid
@@ -9,19 +10,32 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from fastapi.testclient import TestClient
 
-fd, db_path = tempfile.mkstemp(prefix="one_master_tg_crud_", suffix=".db")
-os.close(fd)
-os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
+# Semua database dan file test wajib berada di direktori sementara.
+TEST_DIR = Path(tempfile.mkdtemp(prefix="one_master_tg_crud_"))
+db_path = TEST_DIR / "telegram_crud_test.db"
+storage_path = TEST_DIR / "storage"
 
+os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
+os.environ["DOC_STORAGE"] = str(storage_path)
+
+# Import aplikasi hanya setelah environment test ditetapkan.
 from app.main import app
 from app.models.database import Base, get_db
 from app.models.user import User
 from app.models.telegram_account import TelegramAccount
 from app.api.routes_telegram import _extract_media, _user_dir
 
-engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
-Session = sessionmaker(bind=engine, autoflush=False)
+from app.api import routes_files
 
+# Pastikan upload Telegram/file menggunakan storage sementara.
+routes_files.UPLOAD_DIR = storage_path / "uploads"
+routes_files.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+engine = create_engine(
+    f"sqlite:///{db_path}",
+    connect_args={"check_same_thread": False},
+)
+Session = sessionmaker(bind=engine, autoflush=False)
 
 def override_get_db():
     db = Session()
@@ -44,7 +58,7 @@ class TelegramFileCrudTests(unittest.TestCase):
         app.dependency_overrides.clear()
         app.dependency_overrides.update(cls.prev)
         engine.dispose()
-        Path(db_path).unlink(missing_ok=True)
+        shutil.rmtree(TEST_DIR, ignore_errors=True)
 
     def setUp(self):
         Base.metadata.drop_all(bind=engine)
@@ -149,12 +163,18 @@ class TelegramFileCrudTests(unittest.TestCase):
         (user_dir / f"{fid}.docx").write_bytes(b"lama")
         (user_dir / f"{fid}.name.txt").write_text("lama.docx", encoding="utf-8")
 
-        async def fake_download(token, document, user_id):
-            new_id = "fedcbafedcba"
-            (user_dir / f"{new_id}.docx").write_bytes(b"baru")
-            (user_dir / f"{new_id}.name.txt").write_text("baru.docx", encoding="utf-8")
-            (user_dir / f"{new_id}.extract.txt").write_text("isi baru", encoding="utf-8")
-            return new_id, "baru.docx", "isi baru", 4
+        async def fake_download(
+            token, document, user_id, db, replace_file_id=None
+        ):
+            assert replace_file_id == fid
+            (user_dir / f"{fid}.docx").write_bytes(b"baru")
+            (user_dir / f"{fid}.name.txt").write_text(
+                "baru.docx", encoding="utf-8"
+            )
+            (user_dir / f"{fid}.extract.txt").write_text(
+                "isi baru", encoding="utf-8"
+            )
+            return fid, "baru.docx", "isi baru", 4
 
         with patch(
             "app.api.routes_telegram.decrypt_bot_token", return_value="fake-token"

@@ -12,6 +12,14 @@ type Package = {
   name: string;
   amount_idr: number;
   token_amount: number;
+  daily_token_limit: number;
+  duration_days: number;
+  max_users: number | null;
+  active_users: number;
+  available_slots: number | null;
+  is_full: boolean;
+  qris_image_url: string | null;
+  has_qris: boolean;
 };
 
 type TopUpRequest = {
@@ -76,16 +84,33 @@ export default function TopUpPage() {
       const packageData = await packageRes.json();
       const requestData = await requestRes.json();
 
-      setPackages(packageData.packages || []);
+      const packageList: Package[] = packageData.packages || [];
+
+      setPackages(packageList);
       setRequests(requestData.requests || []);
 
-      if (!selected && packageData.packages?.length) {
-        setSelected(packageData.packages[0].code);
-      }
+      setSelected((current) => {
+        const currentPackage = packageList.find(
+          (item) => item.code === current
+        );
+
+        if (
+          currentPackage &&
+          !currentPackage.is_full &&
+          currentPackage.has_qris
+        ) {
+          return current;
+        }
+
+        return (
+          packageList.find((item) => !item.is_full && item.has_qris)?.code ||
+          ""
+        );
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Gagal memuat data.");
     }
-  }, [token, headers, selected]);
+  }, [token, headers]);
 
   useEffect(() => {
     if (!loading && !token) router.replace("/login");
@@ -95,13 +120,27 @@ export default function TopUpPage() {
     if (token) loadData();
   }, [token, loadData]);
 
+  const selectedPackage = packages.find(
+    (item) => item.code === selected
+  );
+
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError("");
     setSuccess("");
 
-    if (!selected) {
-      setError("Silakan pilih paket Top Up.");
+    if (!selectedPackage) {
+      setError("Silakan pilih paket Top Up yang tersedia.");
+      return;
+    }
+
+    if (selectedPackage.is_full) {
+      setError("Kapasitas paket sudah penuh. Silakan pilih paket lain.");
+      return;
+    }
+
+    if (!selectedPackage.has_qris || !selectedPackage.qris_image_url) {
+      setError("QRIS paket ini belum tersedia. Silakan pilih paket lain.");
       return;
     }
 
@@ -202,7 +241,8 @@ export default function TopUpPage() {
                 key={item.code}
                 type="button"
                 onClick={() => setSelected(item.code)}
-                className={`rounded-xl border p-4 text-left transition ${
+                disabled={item.is_full || !item.has_qris}
+                className={`rounded-xl border p-4 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${
                   selected === item.code
                     ? "border-blue-500 bg-blue-950/50"
                     : "border-gray-700 bg-gray-900 hover:border-gray-500"
@@ -215,6 +255,27 @@ export default function TopUpPage() {
                 <p className="mt-1 text-sm text-blue-300">
                   {item.token_amount.toLocaleString("id-ID")} token
                 </p>
+                <p className="mt-1 text-xs text-gray-400">
+                  Batas harian: {item.daily_token_limit.toLocaleString("id-ID")} token
+                </p>
+                <p className="mt-1 text-xs text-gray-400">
+                  Masa aktif: {item.duration_days} hari
+                </p>
+                <p className="mt-1 text-xs text-gray-400">
+                  {item.max_users === null
+                    ? `Pengguna aktif: ${item.active_users} · Tanpa batas kapasitas`
+                    : `Pengguna aktif: ${item.active_users}/${item.max_users} · Sisa slot: ${item.available_slots}`}
+                </p>
+                {item.is_full && (
+                  <p className="mt-2 text-xs font-semibold text-red-400">
+                    Kapasitas penuh
+                  </p>
+                )}
+                {!item.has_qris && (
+                  <p className="mt-2 text-xs font-semibold text-amber-400">
+                    QRIS belum tersedia
+                  </p>
+                )}
                 {selected === item.code && (
                   <p className="mt-2 text-xs text-blue-300">
                     ✓ Paket dipilih
@@ -229,15 +290,19 @@ export default function TopUpPage() {
           <h2 className="text-lg font-semibold">Pembayaran QRIS</h2>
 
           <div className="mt-4 flex flex-col items-center rounded-lg border border-gray-700 bg-white p-4">
-            {selected ? (
+            {selectedPackage?.qris_image_url ? (
               <img
-                key={selected}
-                src={`/qris/qris-${selected}.png`}
-                alt={`QRIS paket ${selected}`}
+                key={selectedPackage.code + selectedPackage.qris_image_url}
+                src={`${API_URL}${selectedPackage.qris_image_url}`}
+                alt={`QRIS paket ${selectedPackage.name}`}
                 className="h-auto w-full max-w-sm object-contain"
               />
             ) : (
-              <p className="py-12 text-gray-500">Pilih paket terlebih dahulu.</p>
+              <p className="py-12 text-center text-gray-500">
+                {selectedPackage
+                  ? "QRIS untuk paket ini belum tersedia."
+                  : "Pilih paket yang masih tersedia."}
+              </p>
             )}
           </div>
           <p className="mt-3 text-center text-xs text-gray-400">
@@ -249,7 +314,7 @@ export default function TopUpPage() {
           </p>
           <p className="text-xl font-bold">
             {rupiah(
-              packages.find((item) => item.code === selected)?.amount_idr || 0
+              selectedPackage?.amount_idr || 0
             )}
           </p>
         </section>
@@ -277,7 +342,13 @@ export default function TopUpPage() {
 
             <button
               type="submit"
-              disabled={busy || !proof || !selected}
+              disabled={
+                busy ||
+                !proof ||
+                !selectedPackage ||
+                selectedPackage.is_full ||
+                !selectedPackage.has_qris
+              }
               className="w-full rounded-lg bg-blue-600 px-4 py-3 font-semibold hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {busy ? "Mengirim pengajuan…" : "Kirim Bukti Pembayaran"}

@@ -13,6 +13,8 @@ python-multipart
 python-docx
 reportlab
 openpyxl
+python-pptx
 httpx
 pytest
 pypdf
+Pillow

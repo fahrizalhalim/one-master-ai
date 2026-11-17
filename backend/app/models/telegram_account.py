@@ -69,6 +69,12 @@ class TelegramAccount(Base):
         String(64),
         nullable=True,
     )
+    # Kode asli disimpan terenkripsi agar dapat ditampilkan
+    # kembali kepada pemilik akun yang sudah login.
+    link_code_encrypted: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
     link_code_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime,
         nullable=True,
