@@ -65,3 +65,10 @@ Susun hasil dengan struktur:
 - Data penelitian HARUS dari mahasiswa; jangan mengarang angka hasil.
 - Referensi yang tidak yakin keberadaannya → tandai [VERIFIKASI di Google Scholar].
 - Kritik objektif namun membangun: selalu sertakan bagian "Yang Sudah Sesuai" agar mahasiswa tahu apa yang dipertahankan.
+
+## Pelajaran Lapangan Nov 2026 (wajib diterapkan tiap review)
+1. **Cek sisa konten naskah/paper ORANG LAIN (fatal)** — grep blok yang tak nyambung dengan topik: contoh nyata 'kasir PT. Pegadaian… pengarsipan transaksi', 'system monitoring volume air galon', 'HC-05 + ATmega128 + omni wheel' di naskah ESP32/Blynk, 'Metode waterfall' padahal naskah memakai prototype. Juga sisa catatan editor yatim ('Gunakan beberapa level.', 'Kemudian:' berdiri sendiri). Wajib dihapus & ditulis ulang sebelum sidang.
+2. **Silang angka kunci antar-bagian** — contoh nyata: 'dilakukan sebanyak 100 kali. Dari 30 percobaan…' (bertentangan); uji tunggal 2,48 m vs tabel rerata 2,42 m; '7 aspek' lalu mendaftar 8; heading pengujian dobel ('Pengujian Blynk' 2× isi beda). Laporkan tiap inkonsistensi + lokasi.
+3. **Kesimpulan eksplisit 'menjawab rumusan masalah ke-N' = contoh teladan** — apresiasi di review dan ajarkan pola ini ke mahasiswa yang rumusannya tidak selaras.
+4. **Review pasca-sidang / dokumen final** — bila halaman pengesahan memuat tanggal sidang & susunan dewan penguji, sajikan sebagai dokumentasi akhir: cantumkan susunan dewan sesuai naskah (peran aktual, mis. Penguji II), label temuan 'perapian arsip final'.
+5. **Revisi bisa datang dalam format/versi berbeda** — sebelum mengulang temuan, cek penanda pembaru di file baru (typo judul hilang? novelty muncul? tanggal pengesahan berubah?); review dari versi paling maju.
