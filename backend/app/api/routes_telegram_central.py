@@ -6,6 +6,7 @@ Tidak mengubah webhook, token, atau data bot lain.
 
 import hashlib
 import secrets
+import re
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
@@ -46,6 +47,8 @@ from app.services.telegram_workspace_service import (
     delete_user_file,
     upload_telegram_document,
     send_user_file,
+    create_user_document,
+    send_generated_document,
 )
 
 
@@ -63,6 +66,87 @@ def _utc_now() -> datetime:
 
 def _hash_code(code: str) -> str:
     return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def _detect_document_request(message: str) -> tuple[str, str] | None:
+    """Deteksi permintaan pembuatan dokumen dan format output."""
+    value = str(message or "").strip()
+    if not value:
+        return None
+
+    intent = re.search(
+        r"\b(buat(?:kan)?|bikin|susun|siapkan|hasilkan|jadikan(?:kan)?|"
+        r"jadi(?:kan)?|ekspor|export|convert|konversi|ubah(?:kan)?|"
+        r"simpan(?:kan)?)\b",
+        value,
+        flags=re.IGNORECASE,
+    )
+    document = re.search(
+        r"\b(dokumen|laporan|surat|proposal|makalah|"
+        r"artikel|notulen|resume|cv|daftar|tabel|"
+        r"presentasi|slide|spreadsheet|brosur|file|berkas)\b",
+        value,
+        flags=re.IGNORECASE,
+    )
+    # Format keluaran eksplisit (pdf/word/excel/ppt) + konteks "chat di atas"
+    # juga sah sebagai permintaan dokumen, meski tanpa kata benda dokumen.
+    # (kasus nyata: "Buat isi chat di atas menjadi pdf" sempat tidak terdeteksi
+    # sehingga AI menjawab tidak bisa membuat file.)
+    format_only = re.search(
+        r"\b(chat di atas|isi chat|jawaban (?:di )?atas|hasil (?:di )?atas|"
+        r"percakapan (?:di )?atas|balasan (?:di )?atas)\b",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    if not intent or not (document or format_only):
+        return None
+
+    # Pertanyaan CARA (bukan permintaan): "cara membuat pdf", "bagaimana
+    # convert ke excel" — pengguna ingin panduan, bukan file.
+    if re.match(r"^\s*(cara|bagaimana|tutorial|langkah)", value, flags=re.IGNORECASE):
+        return None
+
+    formats = [
+        (r"\bpdf\b", "pdf"),
+        (r"\b(docx|word)\b", "docx"),
+        (r"\bdoc\b", "doc"),
+        (r"\b(xlsx|excel)\b", "xlsx"),
+        (r"\bxls\b", "xls"),
+        (r"\b(pptx|powerpoint|power\s*point)\b", "pptx"),
+        (r"\bppt\b", "ppt"),
+        (r"\bmarkdown\b|\bmd\b", "md"),
+        (r"\btxt\b|\btext\b", "txt"),
+        (r"\bjpeg\b", "jpeg"),
+        (r"\bjpg\b", "jpg"),
+        (r"\bpng\b", "png"),
+    ]
+
+    selected_format = "docx"
+    for pattern, file_format in formats:
+        if re.search(pattern, value, flags=re.IGNORECASE):
+            selected_format = file_format
+            break
+
+    explicit_title = re.search(
+        r"\bjudul\s*:\s*(.+)",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    if explicit_title:
+        title = explicit_title.group(1).strip().splitlines()[0][:100]
+    elif document:
+        title_match = document.group(1)
+        title = title_match.capitalize()
+
+        if title.lower() in {"dokumen", "file", "berkas"}:
+            title = "Dokumen_AI"
+    else:
+        # Format-only tanpa kata benda dokumen (mis. "isi chat di atas").
+        title = "Jawaban_Chat"
+
+    return selected_format, title
 
 
 def _workspace_menu_markup() -> dict:
@@ -370,23 +454,155 @@ async def _deliver_saved_reply_locked(
     ):
         return reject("token_usage_mismatch")
 
-    sent = await _send_message(chat_id, assistant_message.content)
+    # Permintaan dokumen harus memiliki metadata lengkap dan format yang valid.
+    document_requested = update.document_delivery_status != "not_required"
 
-    if sent is None:
-        update.status = "needs_review"
-        update.error_code = "telegram_delivery_uncertain"
-        db.commit()
-        return False
+    if document_requested:
+        if (
+            not update.generated_file_id
+            or not update.document_format
+            or not update.document_title
+        ):
+            return reject("document_metadata_missing")
 
-    if sent is False:
-        update.status = "reply_pending"
-        update.error_code = "telegram_send_failed"
+        if update.document_delivery_status == "sending":
+            # Proses sebelumnya mungkin mati setelah Telegram menerima file.
+            # Jangan pernah mengirim ulang secara otomatis dalam keadaan ini.
+            return reject("telegram_document_delivery_uncertain")
+
+        if update.document_delivery_status == "sent":
+            update.status = "completed"
+            update.error_code = None
+            update.completed_at = _utc_now()
+            db.commit()
+            return True
+
+        if update.document_delivery_status == "failed":
+            update.status = "completed"
+            update.error_code = "document_generation_or_delivery_failed"
+            update.completed_at = _utc_now()
+            db.commit()
+            return True
+
+        if update.document_delivery_status != "pending":
+            return reject("invalid_document_delivery_status")
+
+        # Generator idempotent: jika webhook diproses ulang setelah dokumen
+        # dibuat, file yang sama akan digunakan, bukan dibuat berulang.
+        try:
+            if (
+                not isinstance(update.document_content, str)
+                or not update.document_content.strip()
+            ):
+                raise ValueError("document_content_missing_or_invalid")
+
+            create_user_document(
+                db=db,
+                user=user,
+                title=update.document_title,
+                body_text=update.document_content,
+                file_format=update.document_format,
+                file_id=update.generated_file_id,
+            )
+        except (WorkspaceError, ValueError, OSError, RuntimeError):
+            # Jangan tandai failed sebelum jawaban AI berhasil dikirim.
+            # Jika pengiriman teks gagal, webhook retry masih dapat mencoba
+            # kembali pembuatan/pengiriman jawaban.
+            failure_notice = (
+                "\\n\\n⚠️ Dokumen belum berhasil dibuat atau disimpan. "
+                "Jawaban AI tetap tersedia di atas. Silakan coba kembali "
+                "atau hubungi Admin jika masalah berlanjut."
+            )
+            if update.response_sent_at is None:
+                sent = await _send_message(
+                    chat_id,
+                    assistant_message.content + failure_notice,
+                )
+
+                if sent is None:
+                    return reject("telegram_delivery_uncertain")
+
+                if sent is False:
+                    update.status = "reply_pending"
+                    update.error_code = "telegram_send_failed"
+                    db.commit()
+                    return False
+
+                update.response_sent_at = _utc_now()
+
+            update.document_delivery_status = "failed"
+            update.status = "completed"
+            update.error_code = "document_generation_failed"
+            update.completed_at = _utc_now()
+            db.commit()
+            return True
+
+    # Teks jawaban hanya dikirim jika belum pernah dikonfirmasi terkirim.
+    if update.response_sent_at is None:
+        sent = await _send_message(chat_id, assistant_message.content)
+
+        if sent is None:
+            update.status = "needs_review"
+            update.error_code = "telegram_delivery_uncertain"
+            db.commit()
+            return False
+
+        if sent is False:
+            update.status = "reply_pending"
+            update.error_code = "telegram_send_failed"
+            db.commit()
+            return False
+
+        update.response_sent_at = _utc_now()
         db.commit()
-        return False
+
+    if document_requested:
+        # Simpan status sebelum network call. Jika proses mati saat pengiriman,
+        # webhook retry tidak akan mengirim lampiran kedua kali.
+        update.document_delivery_status = "sending"
+        db.commit()
+
+        try:
+            document_sent = await send_generated_document(
+                chat_id=chat_id,
+                user_id=update.user_id,
+                file_id=update.generated_file_id,
+                file_format=update.document_format,
+                title=update.document_title,
+            )
+        except WorkspaceError:
+            document_sent = False
+
+        if document_sent is None:
+            return reject("telegram_document_delivery_uncertain")
+
+        if document_sent is False:
+            update.document_delivery_status = "failed"
+            db.commit()
+
+            warning_sent = await _send_message(
+                chat_id,
+                "⚠️ Jawaban AI berhasil dikirim, tetapi lampiran dokumen "
+                "gagal dikirim oleh Telegram. Dokumen mungkin masih tersedia "
+                "di menu 📁 File Saya.",
+            )
+
+            if warning_sent is None:
+                return reject("telegram_document_warning_uncertain")
+
+            if warning_sent is False:
+                return reject("telegram_document_warning_failed")
+
+            update.status = "completed"
+            update.error_code = "telegram_document_send_failed"
+            update.completed_at = _utc_now()
+            db.commit()
+            return True
+
+        update.document_delivery_status = "sent"
 
     update.status = "completed"
     update.error_code = None
-    update.response_sent_at = _utc_now()
     update.completed_at = _utc_now()
     db.commit()
     return True
@@ -1059,7 +1275,20 @@ async def central_telegram_webhook(
     workspace_placeholders = {
         "📚 Riwayat Chat": "Riwayat Chat sedang disiapkan untuk integrasi Telegram.",
         "📁 File Saya": "Layanan File Saya sedang disiapkan untuk integrasi Telegram.",
-        "📄 Buat Dokumen": "Layanan Buat Dokumen sedang disiapkan untuk integrasi Telegram.",
+        "📄 Buat Dokumen": (
+            "📄 BUAT DOKUMEN OM.AI\n\n"
+            "Kirim instruksi dokumen yang ingin dibuat. "
+            "AI akan menyusun isinya dan mengirimkan file ke Telegram.\n\n"
+            "Format default: Word (.docx).\n"
+            "Format lain yang didukung: PDF, DOC, TXT, MD, "
+            "Excel (XLS/XLSX), PowerPoint (PPT/PPTX), JPG, JPEG, PNG.\n\n"
+            "Contoh:\n"
+            "• Buatkan laporan kegiatan dalam Word\n"
+            "• Buatkan proposal penelitian dalam PDF\n"
+            "• Buatkan tabel anggaran dalam Excel\n"
+            "• Buatkan presentasi dalam PowerPoint\n\n"
+            "Anda juga dapat menuliskan judul dengan format: Judul: Nama Dokumen"
+        ),
         "🪙 Token & Top Up": "Informasi Token & Top Up sedang disiapkan. Bot Top Up resmi tetap tersedia melalui @OmAIpay_Bot.",
         "👤 Profil & Bantuan": "Menu Profil & Bantuan sedang disiapkan untuk integrasi Telegram.",
     }
@@ -1103,6 +1332,17 @@ async def central_telegram_webhook(
         return {"ok": True, "processed": False, "reason": "message_too_long"}
 
     update.user_id = user.id
+
+    document_request = _detect_document_request(text.strip())
+    if document_request is not None:
+        document_format, document_title = document_request
+        update.document_format = document_format
+        update.document_title = document_title
+        update.generated_file_id = hashlib.sha256(
+            f"{user.id}:{update.update_id}".encode("utf-8")
+        ).hexdigest()[:12]
+        update.document_delivery_status = "pending"
+
     db.commit()
 
     try:
@@ -1117,11 +1357,15 @@ async def central_telegram_webhook(
             current_user=user,
             db=db,
             reservation_reference=f"telegram-central:{update_id}",
+            document_mode=bool(document_request),
         )
 
         # Simpan identitas jawaban sebelum mencoba mengirim ke Telegram.
         update.assistant_message_id = result.assistant_message_id
         update.reservation_id = result.reservation_id
+        update.document_content = (
+            result.document_content if document_request is not None else None
+        )
         link.conversation_id = result.conversation_id
         update.status = "reply_pending"
         update.error_code = None
