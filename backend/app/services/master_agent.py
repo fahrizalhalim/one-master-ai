@@ -35,8 +35,13 @@ GROQ_MODELS = {
 }
 
 
-def _ask_groq(prompt: str, model_id: str) -> dict:
-    """Panggil model Groq dengan validasi jawaban dan usage token."""
+def _ask_groq(
+    prompt: str,
+    model_id: str,
+    max_output_tokens: int = 4096,
+) -> dict:
+    """Panggil Groq dengan batas output dari reservasi token."""
+    output_limit = max(1, min(int(max_output_tokens), 4096))
 
     model = GROQ_MODELS.get(model_id)
     if model is None:
@@ -57,7 +62,7 @@ def _ask_groq(prompt: str, model_id: str) -> dict:
         response = groq_client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=4096,
+            max_completion_tokens=output_limit,
         )
     except Exception as exc:
         status_code = getattr(exc, "status_code", None)
@@ -222,14 +227,19 @@ def _extract_answer(response, api_type: str) -> str | None:
     return None
 
 
-def _ask_legacy(prompt: str, provider_route: str = "manual") -> dict:
-    """Panggil provider lama Ai.sumopod dengan Responses lalu Chat Completions."""
+def _ask_legacy(
+    prompt: str,
+    provider_route: str = "manual",
+    max_output_tokens: int = 4096,
+) -> dict:
+    """Panggil Ai.sumopod dengan batas output dari reservasi."""
+    output_limit = max(1, min(int(max_output_tokens), 4096))
 
     try:
         response = client.responses.create(
             model=OPENAI_MODEL,
             input=prompt,
-            max_output_tokens=4096,
+            max_output_tokens=output_limit,
         )
         api_type = "responses"
 
@@ -255,7 +265,7 @@ def _ask_legacy(prompt: str, provider_route: str = "manual") -> dict:
             response = client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=4096,
+                max_tokens=output_limit,
             )
             api_type = "chat_completions"
 
@@ -309,15 +319,30 @@ def _ask_legacy(prompt: str, provider_route: str = "manual") -> dict:
     }
 
 
-def ask_ai(prompt: str, model_id: str = "default") -> dict:
-    """Gunakan SumoPod sebagai default; Groq dipilih secara eksplisit."""
+def ask_ai(
+    prompt: str,
+    model_id: str = "default",
+    max_output_tokens: int = 4096,
+) -> dict:
+    """Gunakan provider dengan batas output sesuai reservasi."""
+    output_limit = max(1, min(int(max_output_tokens), 4096))
 
     # OM.AI Pro menggunakan provider SumoPod.
     if model_id == "default":
-        return _ask_legacy(prompt, provider_route="manual")
+        if output_limit == 4096:
+            return _ask_legacy(prompt, provider_route="manual")
+        return _ask_legacy(
+            prompt,
+            provider_route="manual",
+            max_output_tokens=output_limit,
+        )
 
     try:
-        return _ask_groq(prompt, model_id)
+        if output_limit == 4096:
+            return _ask_groq(prompt, model_id)
+        return _ask_groq(
+            prompt, model_id, max_output_tokens=output_limit
+        )
 
     except ProviderCallError as groq_error:
         # Timeout, koneksi putus, jawaban tanpa usage, dan hasil tidak pasti
@@ -327,7 +352,13 @@ def ask_ai(prompt: str, model_id: str = "default") -> dict:
 
         # Groq dipastikan menolak. Coba provider lama dengan reservasi yang sama.
         try:
-            return _ask_legacy(prompt, provider_route="fallback")
+            if output_limit == 4096:
+                return _ask_legacy(prompt, provider_route="fallback")
+            return _ask_legacy(
+                prompt,
+                provider_route="fallback",
+                max_output_tokens=output_limit,
+            )
 
         except ProviderCallError as legacy_error:
             # Refund hanya aman jika kedua provider dipastikan menolak.
@@ -352,11 +383,12 @@ def prepare_master_prompt(
     history_text: str = "",
     file_text: str = "",
     user_role: str = "user",
+    document_mode: bool = False,
 ) -> dict:
     """Siapkan prompt lengkap sebelum reservasi token."""
     skill = route_skill(user_message)
 
-    # Skill khusus admin (folder "admin") hanya untuk role admin.
+    # Skill khusus admin hanya dapat digunakan oleh role admin.
     if skill in ADMIN_ONLY_SKILLS and user_role != "admin":
         skill = GENERAL_SKILL_FALLBACK
         skill_instruction = ""
@@ -365,15 +397,41 @@ def prepare_master_prompt(
 
     skill_block = ""
     if skill_instruction:
-        skill_block = f"Instruksi keahlian ({skill}):\n{skill_instruction}"
+        skill_block = (
+            f"Instruksi keahlian ({skill}):\n{skill_instruction}"
+        )
 
     history_block = ""
     if history_text:
-        history_block = f"Riwayat percakapan (terbaru di akhir):\n{history_text}\n"
+        history_block = (
+            f"Riwayat percakapan (terbaru di akhir):\n"
+            f"{history_text}\n"
+        )
 
     file_block = ""
     if file_text:
         file_block = f"{file_text}\n"
+
+    document_instruction = ""
+    if document_mode:
+        document_instruction = """- Anda sedang membuat dokumen untuk pengguna.
+- Hasilkan balasan Telegram yang singkat dan isi dokumen yang lengkap.
+- Jangan mengatakan bahwa Anda tidak dapat membuat atau mengirim file.
+- Jangan menambahkan instruksi menyimpan atau mengubah dokumen menjadi PDF.
+- Jangan mengarang sumber, kutipan, angka, data, atau daftar pustaka.
+- Jika sumber tidak tersedia, nyatakan keterbatasannya secara jujur.
+- Susun dokumen secara profesional dengan judul, subjudul, paragraf,
+  dan penomoran yang konsisten sesuai kebutuhan.
+- Sesuaikan struktur dengan jenis dokumen yang diminta.
+- Jangan memasukkan catatan internal, komentar proses, atau instruksi
+  kepada pengguna yang tidak termasuk isi dokumen.
+- Gunakan format penanda berikut secara persis dan jangan menambahkan
+  teks di luar penanda:
+<<<TELEGRAM_REPLY>>>
+[balasan singkat untuk Telegram]
+<<<DOCUMENT_CONTENT>>>
+[isi dokumen lengkap dalam Markdown]
+<<<END_DOCUMENT>>>"""
 
     instruction = f"""Anda adalah ONE MASTER AI, asisten pekerjaan profesional.
 
@@ -401,7 +459,7 @@ Aturan memahami percakapan dan konteks:
 - Pesan terbaru pengguna adalah permintaan utama. Riwayat hanya menjadi konteks pendukung jika memang relevan.
 - Kenali jawaban singkat seperti nama benda, pilihan, angka, ukuran, atau satuan sebagai kemungkinan jawaban atas pertanyaan asisten sebelumnya.
 - Cocokkan jawaban singkat dengan pertanyaan sebelumnya yang paling relevan, bukan otomatis menganggapnya sebagai topik baru.
-- Perhatikan variasi ejaan, salah ketik, singkatan, dan istilah yang maknanya sama jika konteks mendukungnya. Contohnya, "polibag" dan "polybag" merujuk pada benda yang sama.
+- Perhatikan variasi ejaan, salah ketik, singkatan, dan istilah yang maknanya sama jika konteks mendukungnya.
 - Jika asisten sebelumnya mengajukan beberapa pertanyaan, tentukan pertanyaan mana yang dijawab oleh pesan terbaru. Jangan menganggap pertanyaan lainnya sudah terjawab.
 - Gunakan hanya informasi yang benar-benar diberikan pengguna. Jangan mengarang jawaban untuk pertanyaan yang belum terjawab.
 - Jika masih ada informasi penting yang belum diberikan, tanyakan bagian yang belum terjawab secara jelas dan seperlunya.
@@ -409,11 +467,82 @@ Aturan memahami percakapan dan konteks:
 - Jika pengguna kembali membahas topik lama, gunakan riwayat lama yang relevan apabila tersedia.
 - Jika hubungan pesan terbaru dengan riwayat tidak cukup jelas, minta klarifikasi daripada memaksakan hubungan.
 
+Aturan khusus pembuatan dokumen:
+{document_instruction}
+
 Permintaan pengguna:
 {user_message}"""
 
     return {"skill": skill, "prompt": instruction}
 
+
+def _parse_document_response(raw_text: str) -> tuple[str, str | None]:
+    """Pisahkan balasan Telegram dan isi dokumen dari satu respons AI.
+
+    Robust: model kadang (1) membungkus respons dengan code fence markdown,
+    (2) melanggar/duplikasi penanda, atau (3) terpotong oleh batas token
+    sebelum <<<END_DOCUMENT>>> (kasus nyata: bot menjawab "Dokumen belum
+    berhasil dibuat"). Alih-alih gagal total, respons yang cukup panjang
+    dipakai langsung sebagai isi dokumen.
+    """
+    text = str(raw_text or "")
+    reply_marker = "<<<TELEGRAM_REPLY>>>"
+    document_marker = "<<<DOCUMENT_CONTENT>>>"
+    end_marker = "<<<END_DOCUMENT>>>"
+
+    # Buang code fence markdown yang membungkus seluruh respons.
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
+    if stripped.endswith("```"):
+        stripped = re.sub(r"\s*```$", "", stripped)
+
+    for candidate in (text, stripped):
+        if not all(marker in candidate for marker in (
+            reply_marker, document_marker, end_marker
+        )):
+            continue
+
+        if not (
+            candidate.count(reply_marker) == 1
+            and candidate.count(document_marker) == 1
+            and candidate.count(end_marker) == 1
+        ):
+            continue
+
+        try:
+            reply_start = candidate.index(reply_marker) + len(reply_marker)
+            document_start = candidate.index(document_marker)
+            content_start = document_start + len(document_marker)
+            content_end = candidate.index(end_marker)
+
+            if not (reply_start < document_start < content_start < content_end):
+                raise ValueError("Urutan penanda respons tidak valid")
+
+            reply = candidate[reply_start:document_start].strip()
+            document = candidate[content_start:content_end].strip()
+
+            if not reply or len(reply) > 1500 or not document:
+                raise ValueError("Bagian respons kosong atau terlalu panjang")
+
+            return reply, document
+        except ValueError:
+            continue
+
+    # Jaring pengaman: jangan buang jawaban AI hanya karena format penanda
+    # tidak dipatuhi atau respons terpotong. Cukup panjang = jadikan dokumen.
+    body = (stripped or text).strip()
+    if len(body) >= 100:
+        return (
+            "📄 Dokumen berhasil dibuat dari jawaban AI. Silakan diunduh.",
+            body,
+        )
+
+    return (
+        "Permintaan dokumen belum dapat diproses dengan benar. "
+        "Silakan ulangi permintaan beberapa saat lagi.",
+        None,
+    )
 
 def master_agent(
     user_message: str,
@@ -422,21 +551,43 @@ def master_agent(
     file_text: str = "",
     prepared: dict | None = None,
     model_id: str = "default",
+    document_mode: bool = False,
+    max_output_tokens: int = 4096,
 ) -> dict:
-    """Jalankan Master Agent menggunakan prompt dan model terpilih."""
+    """Jalankan Master Agent dengan batas output reservasi."""
     prepared = prepared or prepare_master_prompt(
         user_message=user_message,
         profession=profession,
         history_text=history_text,
         file_text=file_text,
+        document_mode=document_mode,
     )
 
+    # Pembuatan dokumen membutuhkan output lebih panjang (balasan + isi
+    # dokumen sekaligus). Naikkan batas agar respons model tidak terpotong
+    # sebelum penanda <<<END_DOCUMENT>>> sempat ditulis.
+    if document_mode and max_output_tokens < 12000:
+        max_output_tokens = 12000
+
     skill = prepared["skill"]
-    result = ask_ai(prepared["prompt"], model_id=model_id)
+    if max_output_tokens >= 4096:
+        result = ask_ai(prepared["prompt"], model_id=model_id)
+    else:
+        result = ask_ai(
+            prepared["prompt"],
+            model_id=model_id,
+            max_output_tokens=max_output_tokens,
+        )
+
+    answer = result["text"]
+    document_content = None
+    if document_mode:
+        answer, document_content = _parse_document_response(answer)
 
     return {
         "skill": skill,
-        "answer": result["text"],
+        "answer": answer,
+        "document_content": document_content,
         "prompt_tokens": result["prompt_tokens"],
         "completion_tokens": result["completion_tokens"],
         "total_tokens": result["prompt_tokens"] + result["completion_tokens"],
