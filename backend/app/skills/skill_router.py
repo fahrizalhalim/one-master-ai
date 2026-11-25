@@ -66,6 +66,9 @@ SKILLS = {
         "peneliti", "riset",
     ],
     "admin": [
+        "ai scientist", "agentic scientist", "paper otomatis", "paper ilmiah otomatis",
+        "eksperimen otomatis", "riset otomatis", "autonomous research", "kode eksperimen",
+        "hipotesis otomatis", "draft paper ai", "sakana ai scientist",
         "humanisasi", "humanize", "tulisan natural", "menyunting tulisan",
         "kesan ai", "bau ai", "terdengar natural", "seperti manusia",
         "suara penulis", "gaya penulis",
