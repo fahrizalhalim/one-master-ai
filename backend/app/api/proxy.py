@@ -132,19 +132,30 @@ async def chat_proxy(
     )
     estimated_prompt = max(1, (len(messages_text) + 2) // 3)
 
+    requested_output = body.get("max_tokens")
+    if requested_output is None:
+        requested_output = body.get("max_completion_tokens")
+    if requested_output is None:
+        requested_output = 4096
+
     try:
-        max_output = int(
-            body.get("max_tokens")
-            or body.get("max_completion_tokens")
-            or 4096
-        )
+        requested_output_tokens = int(requested_output)
     except (TypeError, ValueError):
-        max_output = 4096
+        raise HTTPException(
+            status_code=400,
+            detail="Batas output token tidak valid.",
+        )
 
-    if max_output <= 0:
-        raise HTTPException(status_code=400, detail="Batas output token tidak valid.")
+    if requested_output_tokens <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Batas output token harus lebih dari nol.",
+        )
 
-    estimated_tokens = estimated_prompt + max_output
+    # Batas maksimum global proxy, termasuk untuk Admin.
+    requested_output_tokens = min(requested_output_tokens, 4096)
+
+    estimated_tokens = estimated_prompt + requested_output_tokens
     reference = f"proxy:{user.id}:{uuid.uuid4()}"
 
     reservation = reserve_tokens(
@@ -153,7 +164,40 @@ async def chat_proxy(
         estimated_tokens=estimated_tokens,
         reference=reference,
         description="Chat OpenAI-compatible / Open WebUI",
+        estimated_prompt_tokens=estimated_prompt,
+        requested_output_tokens=requested_output_tokens,
     )
+
+    if reservation is None:
+        # Admin tidak memakai reservasi, tetapi tetap mengikuti
+        # batas maksimum output global.
+        allowed_output_tokens = requested_output_tokens
+    else:
+        try:
+            allowed_output_tokens = int(
+                reservation.max_output_tokens
+            )
+        except (AttributeError, TypeError, ValueError):
+            cancel_reservation(db, reservation.id)
+            raise HTTPException(
+                status_code=500,
+                detail="Kapasitas output reservasi tidak valid.",
+            )
+
+        if not 1 <= allowed_output_tokens <= requested_output_tokens:
+            cancel_reservation(db, reservation.id)
+            raise HTTPException(
+                status_code=500,
+                detail="Kapasitas output reservasi berada di luar batas.",
+            )
+
+    # Kirim batas aktual reservasi ke Hermes.
+    if "max_tokens" in body:
+        body["max_tokens"] = allowed_output_tokens
+    if "max_completion_tokens" in body:
+        body["max_completion_tokens"] = allowed_output_tokens
+    if "max_tokens" not in body and "max_completion_tokens" not in body:
+        body["max_tokens"] = allowed_output_tokens
 
     hermes_headers = {
         "Authorization": f"Bearer {HERMES_API_KEY}",

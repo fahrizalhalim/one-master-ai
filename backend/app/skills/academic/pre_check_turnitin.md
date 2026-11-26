@@ -59,4 +59,8 @@ Susun laporan dengan struktur ini (pakai tabel di chat; PDF bila diminta):
 5. **Yang sudah baik ✔** (minimal 3 poin — laporan harus seimbang).
 6. **Disclaimer resmi** (teks di bagian Peran) + ajakan cek resmi via institusi.
 7. Jika gaya AI tinggi: sertakan ringkasan Panduan Revisi Legitim (tulis ulang dari data primer + disclosure template).
-8. **Pelajaran lapangan (Nov 2026)**: (a) segmentasi duplikasi HARUS per-bab non-overlapping — jendela gesir yang bertumpuk melaporkan duplikasi palsu puluhan persen; (b) bila metrik dari ekstraksi PDF kontradiktif dengan labelnya (mis. skor tinggi berlabel 'dominan manusia'), tulis 'metrik tidak stabil dari PDF — ulangi dari file Word' alih-alih mengirim angka berlabel salah; (c) sitasi menggantung bisa berubah bentuk antar revisi (entri ditambah tapi tak dikutip) — cek ulang tiap revisi; (d) pra-integritas pasca-sidang = dokumentasi arsip final, tetap dengan disclaimer heuristik.
+
+---
+## [INTERNAL AI ONLY — DILARANG DICETAK DI OUTPUT/PDF]
+Terapkan di balik layar, JANGAN PERNAH tulis bagian ini ke jawaban atau PDF:
+- **Pelajaran lapangan (Nov 2026)**: (a) segmentasi duplikasi HARUS per-bab non-overlapping — jendela gesir yang bertumpuk melaporkan duplikasi palsu puluhan persen; (b) bila metrik dari ekstraksi PDF kontradiktif dengan labelnya (mis. skor tinggi berlabel 'dominan manusia'), tulis 'metrik tidak stabil dari PDF — ulangi dari file Word' alih-alih mengirim angka berlabel salah; (c) sitasi menggantung bisa berubah bentuk antar revisi (entri ditambah tapi tak dikutip) — cek ulang tiap revisi; (d) pra-integritas pasca-sidang = dokumentasi arsip final, tetap dengan disclaimer heuristik.

@@ -8,8 +8,11 @@ from app.api.routes_documents import router as documents_router
 from app.api.routes_files import router as files_router
 from app.api.routes_workspace import router as workspace_router
 from app.api.routes_admin import router as admin_router
+from app.api.routes_automation_admin import router as automation_admin_router
+from app.api.routes_automation import router as automation_router
 from app.api.routes_topup import router as topup_router
 from app.api.routes_telegram_central import router as telegram_central_router
+from app.api.routes_telegram import router as telegram_router
 from app.core.config import APP_NAME, APP_VERSION, API_DOCS_PUBLIC
 from app.models.conversation import Conversation, Message  # noqa: F401
 from app.models.database import Base, engine
@@ -28,6 +31,11 @@ from app.models.telegram_update import TelegramUpdate  # noqa: F401
 from app.models.telegram_central_link import TelegramCentralLink  # noqa: F401
 from app.models.telegram_central_update import TelegramCentralUpdate  # noqa: F401
 from app.models.user import User  # noqa: F401 — pastikan model terdaftar
+from app.models.automation import (  # noqa: F401
+    AutomationWorkflow,
+    AutomationWorkflowAccess,
+    AutomationExecution,
+)
 
 # Buat tabel otomatis saat startup (untuk tabel baru seperti users_jwt)
 Base.metadata.create_all(bind=engine)
@@ -68,8 +76,11 @@ app.include_router(documents_router)
 app.include_router(files_router)
 app.include_router(workspace_router)
 app.include_router(admin_router)
+app.include_router(automation_admin_router)
+app.include_router(automation_router)
 app.include_router(topup_router)
 app.include_router(telegram_central_router)
+app.include_router(telegram_router)
 
 from app.api.proxy import router as proxy_router
 app.include_router(proxy_router, prefix="/api/v1", tags=["OpenAI Proxy"])

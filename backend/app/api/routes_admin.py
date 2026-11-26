@@ -2,8 +2,9 @@
 
 import secrets
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException
 from app.core.config import (
@@ -27,9 +28,11 @@ from app.models.subscription import TokenWallet, TokenTransaction
 from app.models.user import User
 from app.models.telegram_central_update import TelegramCentralUpdate
 from app.models.telegram_central_link import TelegramCentralLink
+from app.models.telegram_account import TelegramAccount
 from app.services.master_agent import SKILLS_DIR
+from app.api.routes_telegram import activate_telegram_account
 from app.services.auth_service import hash_password, verify_password
-from app.services.quota_service import daily_token_usage
+from app.services.quota_service import WIT, daily_token_usage, effective_daily_token_limit
 from app.services.token_service import _lock_user, cancel_reservation, complete_reservation
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -131,6 +134,7 @@ def reservation_review(
             TokenReservationResult.reservation_id == TokenReservation.id,
         )
         .filter(
+            func.lower(User.email) != "bahulabihu@gmail.com",
             or_(
                 TokenReservation.status.in_(["pending", "needs_review"]),
                 TokenReservationResult.status.in_(["received", "needs_review"]),
@@ -435,6 +439,16 @@ def reset_token_balance(
 
         old_balance = int(wallet.topup_balance or 0)
 
+        if old_balance < 0:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Saldo pengguna memiliki utang {abs(old_balance)} token. "
+                    "Reset saldo tidak dapat menghapus utang; lunasi melalui "
+                    "Top Up atau penambahan saldo Admin."
+                ),
+            )
+
         if old_balance == 0:
             return {
                 "detail": "Saldo pengguna sudah 0.",
@@ -468,6 +482,115 @@ def reset_token_balance(
             "topup_balance": 0,
         }
 
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.post("/tokens/{user_id}/add-daily-limit")
+def add_daily_token_limit(
+    user_id: str,
+    data: AdminTokenCreditRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Menambahkan batas token harian pengguna dengan persetujuan password admin."""
+    verify_admin_password(admin, data.admin_password)
+    if data.amount <= 0 or data.amount > 10_000_000_000:
+        raise HTTPException(
+            status_code=422,
+            detail="Penambahan batas token harian harus bilangan bulat positif yang valid.",
+        )
+
+    target = _lock_user(db, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User tidak ditemukan.")
+
+    try:
+        old_limit = effective_daily_token_limit(db, target)
+        if old_limit is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Akun admin tidak memiliki batas token harian.",
+            )
+
+        now_wit = datetime.now(WIT).replace(tzinfo=None)
+        sub = (
+            db.query(UserSubscription)
+            .join(SubscriptionPlan, UserSubscription.plan_id == SubscriptionPlan.id)
+            .filter(
+                UserSubscription.user_id == user_id,
+                UserSubscription.status == "active",
+                UserSubscription.current_period_start <= now_wit,
+                UserSubscription.current_period_end > now_wit,
+                SubscriptionPlan.is_active.is_(True),
+            )
+            .order_by(UserSubscription.current_period_end.desc())
+            .with_for_update()
+            .first()
+        )
+
+        if sub is None:
+            plan = (
+                db.query(SubscriptionPlan)
+                .filter(SubscriptionPlan.is_active.is_(True))
+                .order_by(SubscriptionPlan.code.asc())
+                .first()
+            )
+            if plan is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Paket langganan aktif belum tersedia di sistem.",
+                )
+            sub = UserSubscription(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                plan_id=plan.id,
+                status="active",
+                daily_token_limit=int(old_limit),
+                current_period_start=now_wit,
+                current_period_end=now_wit + timedelta(days=int(plan.duration_days or 30)),
+            )
+            db.add(sub)
+            db.flush()
+
+        base_limit = int(sub.daily_token_limit or 0)
+        if base_limit <= 0:
+            base_limit = int(old_limit)
+        new_limit = base_limit + int(data.amount)
+        sub.daily_token_limit = new_limit
+
+        note = (data.description or "").strip()
+        desc = (
+            f"Batas token harian ditambah +{data.amount:,} oleh admin {admin.email} "
+            f"({base_limit:,} -> {new_limit:,} token/hari)."
+        )
+        if note:
+            desc = f"{desc} Catatan: {note}"
+
+        db.add(
+            TokenTransaction(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                transaction_type="admin_daily_limit",
+                amount=int(data.amount),
+                balance_after=new_limit,
+                reference=f"admin-daily-limit:{uuid.uuid4()}",
+                description=desc,
+            )
+        )
+
+        db.commit()
+        return {
+            "detail": f"Batas token harian {target.email} ditambah +{data.amount:,} menjadi {new_limit:,} token/hari.",
+            "user_id": user_id,
+            "previous_daily_limit": base_limit,
+            "added_daily_limit": int(data.amount),
+            "daily_limit": new_limit,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         raise
@@ -548,6 +671,140 @@ def add_token_balance(
     except Exception:
         db.rollback()
         raise
+
+
+class AdminDeleteTokenHistoryRequest(BaseModel):
+    transaction_ids: list[str]
+    admin_password: str
+
+
+@router.post("/tokens/history/delete")
+def delete_token_transaction_history(
+    data: AdminDeleteTokenHistoryRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Hapus riwayat transaksi token terpilih dengan persetujuan password admin."""
+    verify_admin_password(admin, data.admin_password)
+
+    clean_ids = list(dict.fromkeys(str(item or "").strip() for item in (data.transaction_ids or []) if str(item or "").strip()))
+    if not clean_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="Pilih minimal satu riwayat transaksi untuk dihapus.",
+        )
+    if len(clean_ids) > 200:
+        raise HTTPException(
+            status_code=422,
+            detail="Penghapusan sekaligus maksimal 200 riwayat transaksi.",
+        )
+
+    try:
+        rows = (
+            db.query(TokenTransaction)
+            .filter(TokenTransaction.id.in_(clean_ids))
+            .with_for_update()
+            .all()
+        )
+        deleted_count = len(rows)
+        if deleted_count == 0:
+            raise HTTPException(
+                status_code=404,
+                detail="Riwayat transaksi tidak ditemukan.",
+            )
+
+        for row in rows:
+            db.delete(row)
+
+        db.commit()
+        return {
+            "detail": f"Berhasil menghapus {deleted_count} riwayat transaksi token.",
+            "deleted_count": deleted_count,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.get("/tokens/history")
+def token_transaction_history(
+    user_id: str | None = None,
+    transaction_type: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Riwayat transaksi token untuk audit Admin; hanya baca."""
+    if limit < 1 or limit > 200:
+        raise HTTPException(
+            status_code=422,
+            detail="Limit harus antara 1 dan 200.",
+        )
+    if offset < 0:
+        raise HTTPException(
+            status_code=422,
+            detail="Offset tidak boleh negatif.",
+        )
+
+    query = (
+        db.query(TokenTransaction, User.email, User.full_name)
+        .join(User, User.id == TokenTransaction.user_id)
+    )
+
+    if user_id:
+        query = query.filter(TokenTransaction.user_id == user_id)
+
+    if transaction_type:
+        query = query.filter(
+            TokenTransaction.transaction_type == transaction_type
+        )
+
+    total = query.count()
+    rows = (
+        query
+        .order_by(
+            TokenTransaction.created_at.desc(),
+            TokenTransaction.id.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    items = []
+    for transaction, email, full_name in rows:
+        items.append({
+            "id": transaction.id,
+            "user_id": transaction.user_id,
+            "email": email,
+            "full_name": full_name,
+            "transaction_type": transaction.transaction_type,
+            "amount": int(transaction.amount),
+            "balance_after": int(transaction.balance_after),
+            "reference": transaction.reference or "",
+            "reservation_id": transaction.reservation_id,
+            "description": transaction.description or "",
+            "created_at": (
+                transaction.created_at.isoformat()
+                if transaction.created_at else None
+            ),
+            "amount_semantics": (
+                "actual_usage"
+                if transaction.transaction_type == "usage"
+                else "balance_movement"
+            ),
+        })
+
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/tokens/summary")
@@ -813,6 +1070,91 @@ def read_skill(
     }
 
 
+
+# ---------- Persetujuan koneksi Telegram ----------
+
+class TelegramDecisionRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+
+
+@router.get("/telegram/pending")
+def list_pending_telegram(
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    rows = (
+        db.query(TelegramAccount, User)
+        .join(User, TelegramAccount.user_id == User.id)
+        .filter(TelegramAccount.status == "pending")
+        .order_by(TelegramAccount.created_at.asc())
+        .all()
+    )
+    return [
+        {
+            "id": account.id,
+            "user_id": account.user_id,
+            "bot_username": account.bot_username,
+            "status": account.status,
+            "created_at": account.created_at.isoformat(),
+            "user_name": user.full_name or "",
+            "user_email": user.email,
+        }
+        for account, user in rows
+    ]
+
+
+@router.post("/telegram/{account_id}/decision")
+def decide_telegram(
+    account_id: str,
+    data: TelegramDecisionRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    account = (
+        db.query(TelegramAccount)
+        .filter(TelegramAccount.id == account_id)
+        .with_for_update()
+        .first()
+    )
+
+    if account is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Permintaan koneksi Telegram tidak ditemukan.",
+        )
+
+    if account.status != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail="Permintaan Telegram sudah diproses sebelumnya.",
+        )
+
+    if data.decision == "reject":
+        account.status = "rejected"
+        account.link_code_hash = None
+        account.link_code_encrypted = None
+        account.link_code_expires_at = None
+        db.commit()
+        return {
+            "id": account.id,
+            "bot_username": account.bot_username,
+            "status": account.status,
+            "message": "Permintaan koneksi bot ditolak.",
+        }
+
+    activate_telegram_account(db, account, approve_pending=True)
+
+    return {
+        "id": account.id,
+        "bot_username": account.bot_username,
+        "status": account.status,
+        "message": (
+            "Bot disetujui dan webhook berhasil dipasang. "
+            "Pengguna tinggal membuka tautan Telegram dan menekan Start."
+        ),
+    }
+
+
 # ---------- Monitoring & Recovery Telegram Central ----------
 
 
@@ -884,12 +1226,17 @@ def telegram_central_review(
         .outerjoin(User, User.id == TelegramCentralUpdate.user_id)
         .filter(
             or_(
+                User.id.is_(None),
+                func.lower(User.email) != "bahulabihu@gmail.com",
+            ),
+            or_(
                 and_(
                     TelegramCentralUpdate.status == "needs_review",
                     TelegramCentralUpdate.error_code.in_([
                         "chat_result_uncertain",
                         "chat_processing_uncertain",
                         "telegram_delivery_uncertain",
+                        "reservation_or_user_missing",
                     ]),
                 ),
                 and_(
@@ -1046,6 +1393,274 @@ async def retry_telegram_central_delivery(
         raise
     finally:
         _release_delivery_lock(connection)
+
+
+@router.post("/telegram-central/{update_id}/recover-saved-reply")
+async def recover_telegram_central_saved_reply(
+    update_id: int,
+    data: AdminPasswordRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Pulihkan ID reservasi dan pesan dari bukti database,
+    lalu kirim jawaban AI yang sudah tersimpan dan settled.
+    Tidak menjalankan AI atau settlement ulang.
+    """
+    verify_admin_password(admin, data.admin_password)
+
+    from app.api.routes_telegram_central import (
+        _acquire_delivery_lock,
+        _release_delivery_lock,
+        _deliver_saved_reply_locked,
+        _delivery_lock_key,
+    )
+
+    connection = _acquire_delivery_lock(update_id)
+    if connection is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Pengiriman sedang diproses oleh proses lain.",
+        )
+
+    connection.info["telegram_central_delivery_lock_key"] = (
+        _delivery_lock_key(update_id)
+    )
+
+    try:
+        update = (
+            db.query(TelegramCentralUpdate)
+            .filter(TelegramCentralUpdate.update_id == update_id)
+            .with_for_update()
+            .first()
+        )
+
+        if update is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Update Telegram Central tidak ditemukan.",
+            )
+
+        if update.status == "completed":
+            return {
+                "ok": True,
+                "update_id": update.update_id,
+                "status": update.status,
+                "detail": "Update ini sudah selesai diproses.",
+            }
+
+        initial_recovery = (
+            update.status == "needs_review"
+            and update.error_code == "reservation_or_user_missing"
+        )
+        interrupted_recovery = (
+            update.status == "processing"
+            and update.error_code == "admin_delivery_in_progress"
+            and bool(update.reservation_id)
+            and bool(update.assistant_message_id)
+        )
+
+        if not (initial_recovery or interrupted_recovery):
+            raise HTTPException(
+                status_code=409,
+                detail="Status update tidak memenuhi syarat recovery jawaban tersimpan.",
+            )
+
+        if (
+            not isinstance(update.telegram_user_id, int)
+            or isinstance(update.telegram_user_id, bool)
+            or update.telegram_user_id <= 0
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Telegram user ID tidak valid.",
+            )
+
+        if not update.user_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Pemilik update Telegram tidak tersedia.",
+            )
+
+        if update.document_delivery_status != "not_required":
+            raise HTTPException(
+                status_code=409,
+                detail="Update memiliki status pengiriman dokumen; recovery pesan biasa ditolak.",
+            )
+
+        # Cari reservasi dari referensi server, bukan ID kiriman frontend.
+        reference = f"telegram-central:{update_id}"
+        reservations = (
+            db.query(TokenReservation)
+            .filter(TokenReservation.reference == reference)
+            .with_for_update()
+            .all()
+        )
+
+        if len(reservations) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Bukti reservasi tidak ditemukan secara unik.",
+            )
+
+        reservation = reservations[0]
+
+        if (
+            reservation.user_id != update.user_id
+            or reservation.status != "completed"
+            or reservation.actual_tokens <= 0
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Kepemilikan atau status settlement reservasi tidak valid.",
+            )
+
+        if update.reservation_id and update.reservation_id != reservation.id:
+            raise HTTPException(
+                status_code=409,
+                detail="ID reservasi pada update tidak cocok dengan referensi.",
+            )
+
+        result = (
+            db.query(TokenReservationResult)
+            .filter(TokenReservationResult.reservation_id == reservation.id)
+            .with_for_update()
+            .first()
+        )
+
+        if (
+            result is None
+            or result.user_id != update.user_id
+            or result.status != "settled"
+            or not result.assistant_message_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Hasil AI belum memiliki bukti settlement yang lengkap.",
+            )
+
+        counts = (
+            result.prompt_tokens,
+            result.completion_tokens,
+            result.total_tokens,
+        )
+        if (
+            any(
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                for value in counts
+            )
+            or result.total_tokens <= 0
+            or result.prompt_tokens + result.completion_tokens != result.total_tokens
+            or reservation.actual_tokens != result.total_tokens
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Rincian token hasil AI tidak konsisten dengan reservasi.",
+            )
+
+        if (
+            update.assistant_message_id
+            and update.assistant_message_id != result.assistant_message_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="ID pesan assistant pada update tidak cocok dengan hasil tersimpan.",
+            )
+
+        user = db.query(User).filter(User.id == update.user_id).first()
+        if (
+            user is None
+            or user.role != "user"
+            or not user.is_active
+            or user.status != "active"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Akun pemilik tidak aktif atau tidak memenuhi syarat.",
+            )
+
+        link = (
+            db.query(TelegramCentralLink)
+            .filter(
+                TelegramCentralLink.user_id == update.user_id,
+                TelegramCentralLink.telegram_user_id == update.telegram_user_id,
+                TelegramCentralLink.is_active.is_(True),
+            )
+            .first()
+        )
+        if link is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Link Telegram aktif tidak cocok dengan pemilik update.",
+            )
+
+        assistant_message = (
+            db.query(Message)
+            .filter(Message.id == result.assistant_message_id)
+            .first()
+        )
+        if (
+            assistant_message is None
+            or assistant_message.role != "assistant"
+            or assistant_message.content != result.response_content
+            or assistant_message.skill != result.skill
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Isi atau skill pesan assistant tidak cocok dengan hasil AI tersimpan.",
+            )
+
+        conversation = (
+            db.query(Conversation)
+            .filter(Conversation.id == assistant_message.conversation_id)
+            .first()
+        )
+        if conversation is None or conversation.user_id != update.user_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Percakapan pesan assistant bukan milik pengguna update.",
+            )
+
+        # ID hanya diisi setelah semua bukti kepemilikan dan settlement lolos.
+        update.reservation_id = reservation.id
+        update.assistant_message_id = assistant_message.id
+        update.status = "processing"
+        update.error_code = "admin_delivery_in_progress"
+        update.completed_at = None
+        db.commit()
+
+        sent = await _deliver_saved_reply_locked(
+            db,
+            update,
+            update.telegram_user_id,
+        )
+
+        db.expire(update)
+        db.refresh(update)
+
+        return {
+            "ok": sent,
+            "update_id": update.update_id,
+            "status": update.status,
+            "error_code": update.error_code,
+            "detail": (
+                "Jawaban AI tersimpan berhasil dikirim."
+                if sent
+                else "Jawaban belum berhasil dikirim. Periksa status dan error_code."
+            ),
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        _release_delivery_lock(connection)
+
 
 @router.get("/telegram-central/webhook-info")
 def get_telegram_central_webhook_info(

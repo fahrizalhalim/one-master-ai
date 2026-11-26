@@ -21,7 +21,7 @@ ALLOWED_EXTENSIONS = {
 FILE_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 
 MAX_LIST_RESULTS = 200
-MAX_READ_CHARS = 30000
+MAX_READ_CHARS = 150000
 
 
 class WorkspaceError(Exception):
@@ -516,12 +516,15 @@ def _read_file_unlocked(
     try:
         max_chars = max(1, min(int(max_chars), MAX_READ_CHARS))
 
-        content = _read_workspace_text(
-            user_dir,
-            extract_path,
-            max_chars=max_chars + 1,
-            errors="replace",
-        )
+        if original.suffix.lower() in {".jpg", ".jpeg", ".png"} and not extract_path.is_file():
+            content = ""
+        else:
+            content = _read_workspace_text(
+                user_dir,
+                extract_path,
+                max_chars=max_chars + 1,
+                errors="replace",
+            )
 
         truncated = len(content) > max_chars
         content = content[:max_chars]
@@ -640,3 +643,28 @@ def open_file_for_download(user_id: str, file_id: str) -> tuple[int, str, str, i
         if directory_fd is not None:
             os.close(directory_fd)
 
+
+
+def read_image_data_url(user_id: str, file_id: str) -> str | None:
+    """Baca file gambar Workspace sebagai data URL JPEG base64."""
+    import base64
+    import io
+    from PIL import Image
+
+    with user_storage_lock(user_id):
+        _, _, original = _find_file_with_root(user_id, file_id)
+        if original.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+            return None
+        try:
+            with Image.open(original) as img:
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                max_side = 1280
+                if max(img.size) > max_side:
+                    img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85, optimize=True)
+                b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                return f"data:image/jpeg;base64,{b64}"
+        except Exception:
+            return None

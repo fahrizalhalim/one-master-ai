@@ -1544,10 +1544,12 @@ async def telegram_webhook(
         user_role=user.role or "user",
     )
 
-    estimated_tokens = max(
+    estimated_prompt_tokens = max(
         1,
         (len(prepared["prompt"]) + 2) // 3,
-    ) + 512
+    )
+    requested_output_tokens = 4096
+    estimated_tokens = estimated_prompt_tokens + requested_output_tokens
 
     reservation = None
 
@@ -1556,6 +1558,8 @@ async def telegram_webhook(
             db=db,
             user=user,
             estimated_tokens=estimated_tokens,
+            estimated_prompt_tokens=estimated_prompt_tokens,
+            requested_output_tokens=requested_output_tokens,
             reference=f"telegram:{account.id}:{update_id}",
             description="Chat Telegram ONE MASTER AI",
         )
@@ -1591,6 +1595,11 @@ async def telegram_webhook(
             file_text=file_text,
             prepared=prepared,
             model_id="default",
+            max_output_tokens=(
+                reservation.max_output_tokens
+                if reservation is not None
+                else 4096
+            ),
         )
 
     except ProviderCallError as exc:

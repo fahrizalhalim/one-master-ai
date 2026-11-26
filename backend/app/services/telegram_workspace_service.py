@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.api.routes_files import ALLOWED_EXT, MAX_SIZE, extract_text
 from app.core.config import OMAI_TELEGRAM_BOT_TOKEN
 from app.models.user import User
-from app.services.document_service import STORAGE_DIR
+from app.services.document_service import STORAGE_DIR, create_document
 from app.services.storage_service import (
     calculate_storage_usage,
     get_storage_policy,
@@ -44,6 +44,7 @@ from app.services.workspace_folders import (
 )
 
 UPLOAD_DIR = STORAGE_DIR / "uploads"
+GENERATED_DIR = STORAGE_DIR / "generated"
 MAX_TELEGRAM_DOWNLOAD = 5 * 1024 * 1024
 FILE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
@@ -54,6 +55,28 @@ def _format_size(size: int) -> str:
     if size >= 1_000:
         return f"{size / 1_000:.1f} KB"
     return f"{size} byte"
+
+
+def _combined_storage_usage(user_id: str) -> int:
+    """Hitung file asli milik user dari uploads dan hasil AI."""
+    if GENERATED_DIR.is_symlink():
+        raise WorkspaceError("Direktori hasil AI tidak aman.")
+
+    upload_dir = _validated_user_dir(
+        user_id,
+        upload_root=UPLOAD_DIR,
+        create=False,
+    )
+    generated_dir = _validated_user_dir(
+        user_id,
+        upload_root=GENERATED_DIR,
+        create=False,
+    )
+
+    return (
+        calculate_storage_usage(upload_dir)
+        + calculate_storage_usage(generated_dir)
+    )
 
 
 def _clean_filename(filename: str) -> str:
@@ -146,9 +169,9 @@ def delete_user_folder(user_id: str, folder_path: str) -> str:
 
 
 def storage_user_info(db: Session, user: User) -> str:
-    user_dir = _validated_user_dir(user.id, upload_root=UPLOAD_DIR, create=True)
+    _validated_user_dir(user.id, upload_root=UPLOAD_DIR, create=True)
     policy = get_storage_policy(db, user)
-    used = calculate_storage_usage(user_dir)
+    used = _combined_storage_usage(user.id)
     quota = policy.get("quota_bytes")
     used_text = _format_size(used)
     quota_text = _format_size(quota) if quota is not None else "Tidak terbatas"
@@ -315,7 +338,7 @@ async def upload_telegram_document(
                 "Upload sedang dikunci oleh kebijakan masa aktif paket penyimpanan."
             )
 
-        used = calculate_storage_usage(user_dir)
+        used = _combined_storage_usage(user.id)
         quota = policy.get("quota_bytes")
         if quota is not None and used + len(content) > quota:
             raise WorkspaceError(
@@ -373,10 +396,210 @@ async def upload_telegram_document(
     )
 
 
-async def send_user_file(chat_id: int, user_id: str, file_id: str) -> bool:
+
+def create_user_document(
+    db: Session,
+    user: User,
+    title: str,
+    body_text: str,
+    file_format: str,
+    file_id: str,
+) -> Path:
+    """Buat dokumen dalam workspace pemilik dengan pemeriksaan kuota."""
+    if not FILE_ID_RE.fullmatch(str(file_id or "").lower()):
+        raise WorkspaceError("ID dokumen tidak valid.")
+
+    user_dir = _validated_user_dir(
+        user.id,
+        upload_root=GENERATED_DIR,
+        create=True,
+    )
+
+    final_path = user_dir / f"{file_id}.{file_format}"
+    name_path = user_dir / f"{file_id}.name.txt"
+    extract_path = user_dir / f"{file_id}.extract.txt"
+    manifest_path = user_dir / f".{file_id}.request.json"
+
+    with user_storage_lock(user.id):
+        policy = get_storage_policy(db, user)
+        already_exists = final_path.is_file() and not final_path.is_symlink()
+
+        if not already_exists and policy.get("eligible"):
+            if not policy.get("upload_allowed", False):
+                raise WorkspaceError(
+                    "Pembuatan dokumen baru dikunci oleh status paket storage Anda."
+                )
+
+            quota = policy.get("quota_bytes")
+            if not isinstance(quota, int) or quota <= 0:
+                raise WorkspaceError(
+                    "Kapasitas storage paket tidak tersedia. Hubungi administrator."
+                )
+
+            used = _combined_storage_usage(user.id)
+            if used >= quota:
+                raise WorkspaceError(
+                    "Kuota storage sudah penuh. Hapus file yang tidak diperlukan "
+                    "atau tingkatkan paket Anda sebelum membuat dokumen baru."
+                )
+
+        try:
+            result = create_document(
+                title=title,
+                body_text=body_text,
+                user_id=user.id,
+                file_format=file_format,
+                file_id=file_id,
+            )
+
+            if result.parent.resolve() != user_dir.resolve():
+                raise WorkspaceError("Lokasi hasil dokumen tidak sesuai.")
+
+            # Hasil retry yang sudah ada tidak dihitung sebagai file baru.
+            if not already_exists and policy.get("eligible"):
+                quota = policy.get("quota_bytes")
+                used_after = _combined_storage_usage(user.id)
+
+                if used_after > quota:
+                    # Batalkan hanya artefak milik permintaan baru ini.
+                    for target in (
+                        result,
+                        name_path,
+                        extract_path,
+                        manifest_path,
+                    ):
+                        if target.exists() or target.is_symlink():
+                            _unlink_workspace_file(
+                                user_dir,
+                                target,
+                                missing_ok=True,
+                            )
+
+                    raise WorkspaceError(
+                        "Dokumen tidak disimpan karena ukuran hasilnya "
+                        "melebihi sisa kuota storage Anda."
+                    )
+
+            return result
+
+        except WorkspaceError:
+            raise
+        except Exception as exc:
+            raise WorkspaceError(
+                "Dokumen gagal dibuat. Silakan coba kembali."
+            ) from exc
+
+
+async def send_generated_document(
+    chat_id: int,
+    user_id: str,
+    file_id: str,
+    file_format: str,
+    title: str,
+) -> bool | None:
+    """Kirim hanya file generated milik user; hasil tri-state."""
     if not OMAI_TELEGRAM_BOT_TOKEN:
         raise WorkspaceError("Konfigurasi bot pusat belum tersedia.")
-    fd, filename, extension, size = open_file_for_download(user_id, file_id)
+
+    if not FILE_ID_RE.fullmatch(str(file_id or "").lower()):
+        raise WorkspaceError("ID dokumen tidak valid.")
+
+    if file_format not in {
+        "pdf", "docx", "doc", "txt", "md",
+        "xlsx", "xls", "pptx", "ppt",
+        "jpg", "jpeg", "png",
+    }:
+        raise WorkspaceError("Format dokumen tidak valid.")
+
+    user_dir = _validated_user_dir(
+        user_id,
+        upload_root=GENERATED_DIR,
+        create=False,
+    )
+    filename_on_disk = f"{file_id}.{file_format}"
+    display_filename = f"{title}.{file_format}"
+    target = user_dir / filename_on_disk
+
+    directory_fd = None
+    file_fd = None
+
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory_fd = os.open(user_dir, flags | nofollow)
+        file_fd = os.open(filename_on_disk, os.O_RDONLY | nofollow, dir_fd=directory_fd)
+
+        metadata = os.fstat(file_fd)
+        import stat
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0:
+            raise WorkspaceError("Hasil dokumen bukan file biasa yang valid.")
+
+        mime = {
+            "pdf": "application/pdf",
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "doc": "application/msword",
+            "txt": "text/plain",
+            "md": "text/markdown",
+            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "xls": "application/vnd.ms-excel",
+            "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "ppt": "application/vnd.ms-powerpoint",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+        }[file_format]
+
+        api_url = (
+            f"https://api.telegram.org/bot{OMAI_TELEGRAM_BOT_TOKEN}/sendDocument"
+        )
+
+        with os.fdopen(file_fd, "rb") as handle:
+            file_fd = None
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    api_url,
+                    data={"chat_id": str(chat_id)},
+                    files={"document": (display_filename, handle, mime)},
+                )
+
+        if 400 <= response.status_code < 500:
+            return False
+        if response.status_code >= 500:
+            return None
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        return True if payload.get("ok") is True else False
+
+    except WorkspaceError:
+        raise
+    except httpx.RequestError:
+        return None
+    except OSError as exc:
+        raise WorkspaceError("File hasil AI tidak dapat dibuka dengan aman.") from exc
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+async def send_user_file(
+    chat_id: int,
+    user_id: str,
+    file_id: str,
+) -> bool | None:
+    """Kirim file milik user; hasil tri-state untuk mencegah duplikasi."""
+    if not OMAI_TELEGRAM_BOT_TOKEN:
+        raise WorkspaceError("Konfigurasi bot pusat belum tersedia.")
+
+    fd, filename, extension, _size = open_file_for_download(user_id, file_id)
+
     mime = {
         ".pdf": "application/pdf",
         ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -391,7 +614,9 @@ async def send_user_file(chat_id: int, user_id: str, file_id: str) -> bool:
         ".jpeg": "image/jpeg",
         ".png": "image/png",
     }.get(extension, "application/octet-stream")
+
     api_url = f"https://api.telegram.org/bot{OMAI_TELEGRAM_BOT_TOKEN}/sendDocument"
+
     try:
         with os.fdopen(fd, "rb") as handle:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -400,24 +625,36 @@ async def send_user_file(chat_id: int, user_id: str, file_id: str) -> bool:
                     data={"chat_id": str(chat_id)},
                     files={"document": (filename, handle, mime)},
                 )
-                response.raise_for_status()
-                payload = response.json()
-                if not payload.get("ok"):
-                    raise WorkspaceError("Telegram gagal mengirim dokumen.")
-        return True
-    except httpx.HTTPError as exc:
-        raise WorkspaceError("File gagal dikirim ke Telegram.") from exc
+
+        if 400 <= response.status_code < 500:
+            return False
+        if response.status_code >= 500:
+            return None
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        return True if payload.get("ok") is True else False
+
+    except httpx.RequestError:
+        return None
 
 async def send_user_image_preview(
     chat_id: int,
     user_id: str,
     file_id: str,
-) -> bool:
-    """Kirim preview gambar milik user melalui Telegram sendPhoto."""
+) -> bool | None:
+    """Kirim preview gambar milik user dengan hasil tri-state."""
     if not OMAI_TELEGRAM_BOT_TOKEN:
         raise WorkspaceError("Konfigurasi bot pusat belum tersedia.")
 
     fd, filename, extension, _size = open_file_for_download(user_id, file_id)
+
     mime = {
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
@@ -428,9 +665,8 @@ async def send_user_image_preview(
         os.close(fd)
         raise WorkspaceError("File tersebut bukan gambar yang didukung.")
 
-    api_url = (
-        f"https://api.telegram.org/bot{OMAI_TELEGRAM_BOT_TOKEN}/sendPhoto"
-    )
+    api_url = f"https://api.telegram.org/bot{OMAI_TELEGRAM_BOT_TOKEN}/sendPhoto"
+
     try:
         with os.fdopen(fd, "rb") as handle:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -439,10 +675,21 @@ async def send_user_image_preview(
                     data={"chat_id": str(chat_id)},
                     files={"photo": (filename, handle, mime)},
                 )
-                response.raise_for_status()
-                payload = response.json()
-                if not payload.get("ok"):
-                    raise WorkspaceError("Telegram gagal menampilkan gambar.")
-        return True
-    except httpx.HTTPError as exc:
-        raise WorkspaceError("Preview gambar gagal dikirim ke Telegram.") from exc
+
+        if 400 <= response.status_code < 500:
+            return False
+        if response.status_code >= 500:
+            return None
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        return True if payload.get("ok") is True else False
+
+    except httpx.RequestError:
+        return None

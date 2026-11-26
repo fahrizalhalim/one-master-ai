@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -74,6 +75,33 @@ class TelegramCentralUpdate(Base):
         String(36),
         ForeignKey("messages_orm.id", ondelete="SET NULL"),
         nullable=True,
+    )
+
+    document_format: Mapped[str | None] = mapped_column(
+        String(10),
+        nullable=True,
+    )
+
+    document_title: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    document_content: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    generated_file_id: Mapped[str | None] = mapped_column(
+        String(12),
+        nullable=True,
+    )
+
+    document_delivery_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="not_required",
+        server_default="not_required",
     )
 
     response_sent_at: Mapped[datetime | None] = mapped_column(

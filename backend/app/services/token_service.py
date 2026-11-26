@@ -74,8 +74,17 @@ def reserve_tokens(
     estimated_tokens: int,
     reference: str,
     description: str = "",
+    *,
+    estimated_prompt_tokens: int | None = None,
+    requested_output_tokens: int = 4096,
 ) -> TokenReservation | None:
-    """Reservasi kuota paket harian terlebih dahulu, lalu saldo Top Up."""
+    """
+    Reservasi kapasitas harian dan saldo Top Up.
+
+    max_output_tokens disimpan sementara pada objek reservasi untuk
+    membatasi output provider tanpa menambah kolom database.
+    Pemanggil lama tetap dapat menggunakan signature sebelumnya.
+    """
 
     if user.role == "admin":
         return None
@@ -94,6 +103,31 @@ def reserve_tokens(
             detail="Estimasi token harus lebih dari nol.",
         )
 
+    try:
+        requested_output_tokens = int(requested_output_tokens)
+        if estimated_prompt_tokens is not None:
+            estimated_prompt_tokens = int(estimated_prompt_tokens)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="Estimasi prompt atau batas output tidak valid.",
+        )
+
+    if requested_output_tokens <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Batas output token harus lebih dari nol.",
+        )
+
+    if (
+        estimated_prompt_tokens is not None
+        and estimated_prompt_tokens < 0
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Estimasi prompt tidak valid.",
+        )
+
     now_utc = utc_now()
 
     try:
@@ -109,7 +143,18 @@ def reserve_tokens(
         # Kunci wallet terlebih dahulu agar pemeriksaan saldo dan kuota
         # dilakukan terhadap saldo yang sama selama reservasi.
         wallet = _get_wallet(db, locked_user.id)
-        topup_available = int(wallet.topup_balance)
+        topup_available = int(wallet.topup_balance or 0)
+
+        if topup_available < 0:
+            debt = abs(topup_available)
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Saldo Top Up Anda negatif (utang {debt} token). "
+                    "Silakan Top Up atau minta Admin menambahkan saldo "
+                    "sebelum menggunakan AI kembali."
+                ),
+            )
 
         daily_limit, daily_used = daily_token_usage(db, locked_user)
 
@@ -118,30 +163,75 @@ def reserve_tokens(
 
         daily_remaining = max(0, daily_limit - daily_used)
 
-        reserved_daily = min(estimated_tokens, daily_remaining)
-        reserved_topup = estimated_tokens - reserved_daily
+        # Mode baru: prompt dan output dihitung terpisah agar output
+        # provider tidak melampaui kapasitas harian maupun saldo Top Up.
+        if estimated_prompt_tokens is not None:
+            prompt_reserve = estimated_prompt_tokens
 
-        if reserved_topup > 0 and topup_available < reserved_topup:
-            shortage = reserved_topup - max(0, topup_available)
-            raise HTTPException(
-                status_code=429,
-                detail=(
-                    "Kuota paket harian tidak mencukupi dan saldo Top Up "
-                    "tidak cukup untuk menutup kekurangannya. "
-                    f"Sisa kuota paket: {daily_remaining} token; "
-                    f"Kekurangan saldo Top Up: {shortage} token."
-                ),
+            daily_output_capacity = daily_remaining - prompt_reserve
+            wallet_output_capacity = topup_available - prompt_reserve
+
+            if daily_output_capacity <= 0:
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        "Sisa batas harian tidak mencukupi untuk estimasi "
+                        f"prompt {prompt_reserve} token. Sisa batas: "
+                        f"{daily_remaining} token."
+                    ),
+                )
+
+            if wallet_output_capacity <= 0:
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        "Saldo Top Up tidak mencukupi untuk estimasi prompt "
+                        f"{prompt_reserve} token. Saldo tersedia: "
+                        f"{max(0, topup_available)} token."
+                    ),
+                )
+
+            allowed_output_tokens = min(
+                requested_output_tokens,
+                daily_output_capacity,
+                wallet_output_capacity,
             )
+            reserved_daily = prompt_reserve + allowed_output_tokens
+            reserved_topup = reserved_daily
 
-        if reserved_topup > 0 and topup_available < 0:
-            raise HTTPException(
-                status_code=429,
-                detail=(
-                    "Saldo Top Up memiliki kekurangan dari pemakaian "
-                    "sebelumnya. Silakan isi saldo terlebih dahulu."
-                ),
+        else:
+            # Kompatibilitas untuk pemanggil lama yang hanya memberikan
+            # estimasi total tanpa rincian prompt dan output.
+            if estimated_tokens > daily_remaining:
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        "Batas pemakaian token harian tidak mencukupi. "
+                        f"Sisa batas hari ini: {daily_remaining} token; "
+                        f"estimasi permintaan: {estimated_tokens} token."
+                    ),
+                )
+
+            if topup_available < estimated_tokens:
+                shortage = estimated_tokens - max(0, topup_available)
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        "Saldo Top Up tidak mencukupi. "
+                        f"Saldo tersedia: {max(0, topup_available)} token; "
+                        f"Kekurangan: {shortage} token."
+                    ),
+                )
+
+            allowed_output_tokens = min(
+                requested_output_tokens,
+                estimated_tokens,
             )
+            reserved_daily = estimated_tokens
+            reserved_topup = estimated_tokens
 
+        # Batas harian hanya membatasi pemakaian.
+        # Seluruh token tetap berasal dari saldo Top Up.
         wallet.topup_balance -= reserved_topup
 
         reservation = TokenReservation(
@@ -170,6 +260,7 @@ def reserve_tokens(
                     amount=-reserved_topup,
                     balance_after=int(wallet.topup_balance),
                     reference=reference,
+                    reservation_id=reservation.id,
                     description=(
                         f"Reservasi AI: {reserved_daily} token paket harian, "
                         f"{reserved_topup} token Top Up."
@@ -179,6 +270,10 @@ def reserve_tokens(
 
         db.commit()
         db.refresh(reservation)
+
+        # Atribut sementara ini tidak disimpan ke database.
+        # Pemanggil meneruskannya ke batas output provider.
+        reservation.max_output_tokens = allowed_output_tokens
         return reservation
 
     except Exception:
@@ -368,8 +463,11 @@ def complete_reservation(
             package_tokens = actual_tokens
             topup_actual = 0
         else:
-            package_tokens = min(actual_tokens, reserved_daily)
-            topup_actual = actual_tokens - package_tokens
+            # Semua token aktual dihitung ke batas harian dan ditagihkan
+            # ke saldo Top Up. Ini juga menangani reservasi lama yang
+            # dahulu hanya mengisi reserved_daily tanpa memotong saldo.
+            package_tokens = actual_tokens
+            topup_actual = actual_tokens
 
         if reservation.status == "completed":
             usage = (
@@ -379,7 +477,10 @@ def complete_reservation(
             )
             transaction = (
                 db.query(TokenTransaction)
-                .filter(TokenTransaction.reservation_id == reservation_id)
+                .filter(
+                    TokenTransaction.reservation_id == reservation_id,
+                    TokenTransaction.transaction_type == "usage",
+                )
                 .first()
             )
 
@@ -425,25 +526,10 @@ def complete_reservation(
         topup_refund = max(0, reserved_topup - topup_actual)
         extra = max(0, topup_actual - reserved_topup)
 
-        # Admin tidak dibatasi saldo Top Up.
-        # Pengguna biasa tidak boleh menyelesaikan pemakaian
-        # jika saldo tersedia tidak cukup untuk menutup kelebihannya.
-        available_balance = int(wallet.topup_balance or 0)
-
-        if not is_admin and extra > available_balance:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Saldo Top Up tidak mencukupi untuk menutup kelebihan "
-                    f"pemakaian {extra} token. Saldo tersedia: "
-                    f"{available_balance} token. "
-                    "Hasil AI tetap tersimpan dan settlement menunggu "
-                    "Top Up atau pemeriksaan Admin."
-                ),
-            )
-
-        wallet.topup_balance += topup_refund
-        wallet.topup_balance -= extra
+        # Settlement selalu membukukan seluruh pemakaian aktual.
+        # Jika kelebihan reservasi melampaui saldo, selisih menjadi utang.
+        # Top Up atau kredit Admin berikutnya akan melunasi utang tersebut.
+        wallet.topup_balance += topup_refund - extra
 
         reservation.actual_tokens = actual_tokens
         reservation.status = "completed"

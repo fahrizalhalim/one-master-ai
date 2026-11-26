@@ -20,6 +20,7 @@ from app.models.token_reservation_result import TokenReservationResult
 from app.models.subscription import UserSubscription, TokenWallet
 from sqlalchemy import func
 from app.services.master_agent import master_agent, prepare_master_prompt, ProviderCallError
+from app.services.context_retrieval import search_past_conversations, search_past_files
 from app.services.quota_service import daily_token_usage
 from app.services.token_service import (
     WIT,
@@ -77,7 +78,7 @@ def my_quota(
         .filter(TokenWallet.user_id == current_user.id)
         .first()
     )
-    topup_balance = max(0, int(wallet.topup_balance)) if wallet else 0
+    topup_balance = int(wallet.topup_balance or 0) if wallet else 0
 
     return {
         "unlimited": False,
@@ -86,6 +87,7 @@ def my_quota(
         "daily_remaining": daily_remaining,
         "topup_balance": topup_balance,
         "total_balance": topup_balance,
+        "topup_debt": max(0, -topup_balance),
         "timezone": "Asia/Jayapura",
     }
 
@@ -107,6 +109,8 @@ class ChatResponse(BaseModel):
     answer: str
     assistant_message_id: str
     reservation_id: str | None = None
+    document_content: str | None = None
+    actions: list[dict] | None = None
 
 
 def _get_own_conversation(
@@ -119,6 +123,10 @@ def _get_own_conversation(
 
 
 def _save_message(db: Session, conversation_id: str, role: str, content: str, skill: str = ""):
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is not None:
+        conversation.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
     db.add(
         Message(
             conversation_id=conversation_id,
@@ -290,6 +298,10 @@ def _select_relevant_history(history: list, user_message: str) -> str:
     if not selected_turns and is_follow_up:
         selected_turns = turns[-3:]
 
+    # Sliding window default: selalu sertakan 2 giliran terakhir agar AI tidak kehilangan konteks.
+    if not selected_turns:
+        selected_turns = turns[-2:]
+
     selected = [
         message
         for turn in selected_turns
@@ -297,7 +309,7 @@ def _select_relevant_history(history: list, user_message: str) -> str:
     ]
 
     return "\n".join(
-        f"{'User' if m.role == 'user' else 'Asisten'}: {(m.content or '')[:500]}"
+        f"{'User' if m.role == 'user' else 'Asisten'}: {(m.content or '')[:4000]}"
         for m in selected
     )
 
@@ -317,6 +329,7 @@ def _chat_impl(
     db: Session,
     *,
     reservation_reference: str | None = None,
+    document_mode: bool = False,
 ):
     # Pemeriksaan status akun. Kuota ditangani token_service.
     if current_user.status != "active":
@@ -339,34 +352,151 @@ def _chat_impl(
         db.add(conv)
         db.flush()
 
+    from app.services.web_chat_commands import handle_web_chat_command, try_export_last_assistant_message
+    cmd_res = handle_web_chat_command(db, current_user, data.message)
+    if cmd_res is None and not data.file_id:
+        cmd_res = try_export_last_assistant_message(db, current_user, conv.id, data.message)
+    if cmd_res is not None:
+        user_msg = Message(conversation_id=conv.id, role="user", content=data.message, skill=cmd_res["skill"])
+        asst_msg = Message(conversation_id=conv.id, role="assistant", content=cmd_res["answer"], skill=cmd_res["skill"])
+        conv.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.add(user_msg)
+        db.add(asst_msg)
+        db.commit()
+        db.refresh(asst_msg)
+        return ChatResponse(
+            conversation_id=conv.id,
+            skill=cmd_res["skill"],
+            answer=cmd_res["answer"],
+            assistant_message_id=asst_msg.id,
+            actions=cmd_res.get("actions"),
+        )
+
     # Konteks: N pesan terakhir percakapan ini
     history = (
         db.query(Message)
         .filter(Message.conversation_id == conv.id)
-        .order_by(Message.created_at.desc())
+        .order_by(Message.created_at.desc(), Message.role.asc())
         .limit(HISTORY_LIMIT)
         .all()
     )
     history = list(reversed(history))
 
-    # Pilih konteks relevan dari riwayat percakapan aktif.
-    history_text = _select_relevant_history(history, data.message)
+    # Pilih konteks relevan dari riwayat aktif (lewati jika file langsung dilampirkan).
+    history_text = "" if data.file_id else _select_relevant_history(history, data.message)
 
-    # Konteks file terunggah (maks 6000 char agar prompt tidak membengkak)
-    file_block = ""
-    if data.file_id:
-        from app.api.routes_files import _user_dir
-
-        extract = _user_dir(current_user.id) / f"{data.file_id}.extract.txt"
-        if extract.exists():
-            text = extract.read_text(encoding="utf-8", errors="ignore")
-            file_block = (
-                "Pengguna melampirkan dokumen berikut. Gunakan isinya sebagai "
-                "konteks utama jawaban jika relevan:\n\n--- AWAL DOKUMEN ---\n"
-                f"{text[:6000]}\n--- AKHIR DOKUMEN ---\n"
+    # Retrieval otomatis percakapan terdahulu berdasarkan relevansi.
+    # Pencarian tetap dibatasi pada pemilik yang sama dan mengecualikan
+    # percakapan aktif agar konteks tidak terduplikasi.
+    past_history_text = ""
+    if not data.file_id:
+        try:
+            past_history_text = search_past_conversations(
+                db=db,
+                user_id=str(current_user.id),
+                query=data.message,
+                limit=10,
+                max_chars=9000,
+                exclude_conversation_id=str(conv.id),
             )
-        else:
-            raise HTTPException(status_code=404, detail="Lampiran tidak ditemukan.")
+        except Exception:
+            logger.exception("Retrieval percakapan lama gagal.")
+
+    if past_history_text:
+        history_text = "\n\n".join(
+            part for part in (history_text, past_history_text) if part
+        )
+
+    # Konteks file langsung menggunakan Workspace agar Uploads dan Hasil AI
+    # sama-sama dapat diakses, tetap dengan pembatasan pemilik file.
+    def _compact_document_with_audit(raw_text: str) -> str:
+        import re
+        raw = str(raw_text or "")
+        words = len(re.findall(r"\b\w+\b", raw))
+        dbl_spaces = len(re.findall(r"[A-Za-z0-9.,;:] {2,}[A-Za-z0-9]", raw))
+        glued = list(dict.fromkeys(
+            re.findall(r"[a-z]{3,}[.;:,][A-Z][a-z]{2,}", raw)
+        ))[:12]
+        headings = re.findall(r"(?m)^(\d+(?:\.\d+){1,3})\s+([^\n]{3,55})", raw)
+        heading_list = ", ".join(f"{n} {t.strip()}" for n, t in headings[:45])
+
+        text = re.sub(r"\.{4,}", " ", raw)
+        text = re.sub(r"[ \t]{2,}", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+
+        m = re.search(r"\n\s*LAMPIRAN\b", text, flags=re.IGNORECASE)
+        if m and len(text) - m.start() > 2200:
+            head = text[:m.start()]
+            tail = text[m.start():]
+            text = (
+                f"{head}\n\n{tail[:1100]}\n"
+                "[... bagian tengah kode/lampiran dipadatkan otomatis ...]\n"
+                f"{tail[-800:]}"
+            )
+
+        audit = (
+            "[HASIL AUDIT OTOMATIS SISTEM (PRE-CHECK)]\n"
+            f"- Estimasi jumlah kata utuh: {words} kata\n"
+            f"- Spasi ganda antar-kata terdeteksi: {dbl_spaces} titik\n"
+            f"- Contoh tanda baca tanpa spasi: {', '.join(glued) if glued else 'tidak ditemukan'}\n"
+            f"- Urutan nomor subbab terdeteksi: {heading_list or 'tidak terdeteksi'}\n\n"
+        )
+        return audit + text.strip()
+
+    file_block = ""
+    image_data_url = None
+    if data.file_id:
+        from app.services.workspace_service import read_file, read_image_data_url, WorkspaceError
+
+        try:
+            file_result = read_file(
+                str(current_user.id),
+                data.file_id,
+                max_chars=120000,
+            )
+            ext = str(file_result.get("extension") or "").lower()
+            if ext in {".jpg", ".jpeg", ".png"}:
+                image_data_url = read_image_data_url(str(current_user.id), data.file_id)
+                if not image_data_url:
+                    raise WorkspaceError("File gambar tidak valid atau rusak.")
+                file_block = (
+                    "INSTRUKSI WAJIB ANALISIS GAMBAR: Pengguna melampirkan gambar terbaru di bawah ini. "
+                    "Amati, baca teks/objek/grafik di dalamnya secara akurat, dan jelaskan HANYA isi visual nyata yang terlihat pada gambar terlampir ini. "
+                    "DILARANG KERAS menebak, mengarang, atau mengambil konteks dari dokumen PDF/skripsi/chat sebelumnya.\n"
+                    f"Nama file gambar: {file_result.get('filename', 'gambar.jpg')}\n"
+                )
+            else:
+                text = _compact_document_with_audit(file_result.get("content") or "")
+                file_block = (
+                    "INSTRUKSI WAJIB: Pengguna melampirkan dokumen terbaru di bawah ini. "
+                    "Fokus HANYA pada dokumen ini dan ABAIKAN dokumen/proposal/skripsi lain dari chat sebelumnya.\n"
+                    f"Nama file: {file_result.get('filename', 'File')}\n"
+                    f"Lokasi: {file_result.get('folder_path', '')}\n\n"
+                    "--- AWAL DOKUMEN ---\n"
+                    f"{text}\n--- AKHIR DOKUMEN ---\n"
+                )
+        except (WorkspaceError, OSError, ValueError):
+            raise HTTPException(
+                status_code=404,
+                detail="Lampiran tidak ditemukan atau tidak dapat dibaca.",
+            )
+
+    # Retrieval otomatis dokumen Workspace milik pengguna.
+    # Hanya dijalankan jika tidak ada file_id yang dirujuk secara langsung.
+    if not data.file_id:
+        try:
+            past_file_text = search_past_files(
+                user_id=str(current_user.id),
+                query=data.message,
+                limit=3,
+                max_chars=4500,
+            )
+            if past_file_text:
+                file_block = "\n\n".join(
+                    part for part in (file_block, past_file_text) if part
+                )
+        except Exception:
+            logger.exception("Retrieval dokumen lama gagal.")
 
     # Siapkan prompt lengkap sebelum reservasi.
     prepared = prepare_master_prompt(
@@ -376,17 +506,23 @@ def _chat_impl(
         history_text=history_text,
         file_text=file_block,
         user_role=current_user.role or "user",
+        document_mode=document_mode,
     )
 
-    # Estimasi reservasi awal: token prompt + cadangan output 512 token.
-    # Batas output provider tetap 4096 token.
-    estimated_tokens = max(1, (len(prepared["prompt"]) + 2) // 3) + 512
+    # Estimasi prompt dipisahkan dari kapasitas output provider.
+    estimated_prompt_tokens = max(
+        1, (len(prepared["prompt"]) + 2) // 3
+    )
+    requested_output_tokens = 4096
+    estimated_tokens = estimated_prompt_tokens + requested_output_tokens
 
     # Reservasi saldo paket/top-up dan batas harian sebelum memanggil AI.
     reservation = reserve_tokens(
         db=db,
         user=current_user,
         estimated_tokens=estimated_tokens,
+        estimated_prompt_tokens=estimated_prompt_tokens,
+        requested_output_tokens=requested_output_tokens,
         reference=reservation_reference or f"chat:{conv.id}",
         description=(
             "Chat Telegram pusat ONE MASTER AI"
@@ -406,6 +542,13 @@ def _chat_impl(
             file_text=file_block,
             prepared=prepared,
             model_id=data.model_id,
+            document_mode=document_mode,
+            max_output_tokens=(
+                reservation.max_output_tokens
+                if reservation is not None
+                else 4096
+            ),
+            image_data_url=image_data_url,
         )
     except ProviderCallError as exc:
         db.commit()
@@ -606,10 +749,49 @@ def _chat_impl(
         )
         db.commit()
 
+# --- AUTO DOC ACTIONS ---
+    doc_actions: list[dict] | None = None
+    msg_low = (data.message or "").strip().lower()
+    m_fmt = re.match(
+        r"^(?:tolong\s+|coba\s+|silakan\s+)?(?:buat(?:kan)?|jadikan|simpan|ekspor)\s+(?:file\s+|dokumen\s+)?(pdf|docx|word)(?:\s*:|\s+tentang\b|\s+mengenai\b|\s+untuk\b|\s+berisi\b)",
+        msg_low,
+    )
+    if m_fmt and (result.get("answer") or "").strip():
+        try:
+            import secrets
+            from app.services import telegram_workspace_service as ws_tg
+            from app.services.web_chat_commands import _infer_smart_filename
+
+            fmt_raw = m_fmt.group(1)
+            fmt = "docx" if fmt_raw in ("docx", "word") else "pdf"
+            title, smart_filename = _infer_smart_filename(result["answer"], fmt)
+            file_id = secrets.token_hex(6)
+            ws_tg.create_user_document(
+                db=db,
+                user=current_user,
+                title=title,
+                body_text=result["answer"].strip(),
+                file_format=fmt,
+                file_id=file_id,
+            )
+            doc_actions = [
+                {
+                    "type": "download_file",
+                    "label": f"⬇️ Unduh {smart_filename}",
+                    "file_id": file_id,
+                    "filename": smart_filename,
+                },
+                {"type": "command", "label": "📁 Lihat Daftar File", "value": "/daftar_file"},
+            ]
+        except Exception:
+            logger.exception("Auto-export file dari prompt chat gagal.")
+
     return ChatResponse(
         conversation_id=conv.id,
         skill=result["skill"],
         answer=result["answer"],
         assistant_message_id=assistant_message.id,
         reservation_id=reservation.id if reservation is not None else None,
+        document_content=result.get("document_content"),
+            actions=doc_actions,
     )

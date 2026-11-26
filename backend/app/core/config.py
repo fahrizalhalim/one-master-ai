@@ -62,3 +62,9 @@ OMAI_TELEGRAM_BOT_USERNAME = _get(
     "OneMasterAI_Bot",
 ).lstrip("@")
 OMAI_TELEGRAM_WEBHOOK_SECRET = _get("OMAI_TELEGRAM_WEBHOOK_SECRET")
+
+
+# Koneksi internal ke n8n. API key hanya digunakan oleh backend.
+N8N_BASE_URL = _get("N8N_BASE_URL").rstrip("/")
+N8N_API_KEY = _get("N8N_API_KEY")
+N8N_WEBHOOK_AUTH_VALUE = _get("N8N_WEBHOOK_AUTH_VALUE")

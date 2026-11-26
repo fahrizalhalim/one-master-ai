@@ -1,3 +1,4 @@
+import asyncio
 """Telegram bot pusat ONE MASTER AI.
 
 Router ini berdampingan dengan sistem Telegram per-user yang lama.
@@ -5,9 +6,10 @@ Tidak mengubah webhook, token, atau data bot lain.
 """
 
 import hashlib
+import json
 import secrets
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import httpx
@@ -17,7 +19,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
+from app.api.routes_auth import build_user_info
 from app.api.routes_chat import ChatRequest, _chat_impl
+from app.api.routes_automation import (
+    AutomationExecuteRequest,
+    list_available_workflows,
+    execute_automation_workflow,
+    list_my_executions,
+)
 from app.core.config import (
     OMAI_TELEGRAM_BOT_TOKEN,
     OMAI_TELEGRAM_BOT_USERNAME,
@@ -30,6 +39,14 @@ from app.models.telegram_central_update import TelegramCentralUpdate
 from app.models.token_reservation import TokenReservation
 from app.models.token_reservation_result import TokenReservationResult
 from app.models.user import User
+from app.models.subscription import (
+    SubscriptionPlan,
+    TokenWallet,
+    UserSubscription,
+)
+from app.models.topup import TopUpRequest
+from app.services.quota_service import WIT, daily_token_usage
+from app.services.token_service import wit_now
 from app.services.telegram_workspace_service import (
     WorkspaceError,
     workspace_menu_text,
@@ -52,6 +69,8 @@ from app.services.telegram_workspace_service import (
 )
 
 
+from app.services.document_title_helper import resolve_document_title
+
 router = APIRouter(
     prefix="/api/v1/telegram-central",
     tags=["telegram-central"],
@@ -60,12 +79,98 @@ router = APIRouter(
 LINK_CODE_MINUTES = 15
 
 
+def _is_pure_export_command(message_text: str) -> bool:
+    """Deteksi perintah ekspor murni (mis. 'Buat dalam pdf') tanpa instruksi ubah isi."""
+    normalized = (message_text or "").lower().strip()
+    if not normalized or len(normalized) > 80:
+        return False
+    # Jika ada instruksi pengolahan ulang, tetap serahkan ke LLM.
+    if re.search(
+        r"\b(ringkas|rangkum|perbaiki|revisi|ubah isi|tambahkan|hapus|terjemahkan|translate|buat baru|tentang|mengenai|bahas)\b",
+        normalized,
+    ):
+        return False
+    filler = {
+        "buat", "buatkan", "jadikan", "ubah", "konversi", "export", "ekspor",
+        "simpan", "cetak", "kirim", "format", "versi", "dalam", "bentuk", "ke",
+        "jadi", "menjadi", "sebagai", "file", "berkas", "dokumen",
+        "pdf", "docx", "word", "doc", "excel", "xlsx", "xls",
+        "ppt", "pptx", "powerpoint", "markdown", "md", "txt", "text",
+        "jpg", "jpeg", "png", "bikin", "bikinkan", "convert",
+        "tolong", "bisa", "coba", "minta", "chat", "isi", "percakapan",
+        "di", "atas", "diatas", "tersebut", "tadi", "sebelumnya", "hasil",
+        "hasilnya", "jawaban", "review", "ini", "itu", "nya", "dong", "ya",
+        "aja", "saja", "please", "yang", "dari", "untuk", "langsung",
+    }
+    if not re.search(
+        r"\b(pdf|docx|word|doc|xlsx|excel|xls|pptx|powerpoint|power\s*point|ppt|markdown|md|txt|text|jpeg|jpg|png)\b",
+        normalized,
+    ):
+        return False
+    words = re.findall(r"[a-z0-9]+", normalized)
+    if not words:
+        return False
+    remaining = [w for w in words if w not in filler]
+    return len(remaining) == 0
+
+
 def _utc_now() -> datetime:
     return datetime.utcnow()
 
 
 def _hash_code(code: str) -> str:
     return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def _automatic_upload_context_file_id(user_id: str, message: str) -> str | None:
+    """Pilih unggahan terbaru milik user hanya saat pesan jelas merujuk file."""
+    reference = re.search(
+        r"\b(draft|draf|dokumen|berkas|file|lampiran|unggahan|upload|"
+        r"diunggah|terunggah|gambar|foto|image|photo|screenshot|tangkapan|ilustrasi|diagram|grafik|bagan|review|reviu|ulas(?:an)?|koreksi|periksa|cek|analisis|analisa|ringkas(?:an)?|rangkum(?:an)?|baca|bedah|evaluasi|revisi|perbaiki|parafrase|terjemah(?:kan)?|skripsi|proposal|tesis|disertasi|makalah|naskah|jurnal|laporan)\b",
+        str(message or ""),
+        flags=re.IGNORECASE,
+    )
+    if not reference:
+        return None
+
+    try:
+        from app.services.workspace_service import list_files
+
+        files = list_files(user_id, limit=100)
+        uploads = [
+            item for item in files
+            if not str(item.get("folder_path") or "").strip().lower().startswith("hasil ai")
+        ]
+        uploads.sort(
+            key=lambda item: float(item.get("modified_at") or 0.0),
+            reverse=True,
+        )
+
+        image_only_query = bool(
+            re.search(r"\b(gambar|foto|image|photo|screenshot|tangkapan)\b", str(message or ""), flags=re.IGNORECASE)
+            and not re.search(r"\b(skripsi|proposal|tesis|disertasi|makalah|naskah|jurnal|laporan|dokumen|pdf|docx|word|excel|xlsx|ppt|pptx)\b", str(message or ""), flags=re.IGNORECASE)
+        )
+
+        for item in uploads:
+            file_id = str(item.get("id") or "")
+            if not file_id:
+                continue
+
+            try:
+                from app.services.workspace_service import read_file, WorkspaceError
+                contents = read_file(user_id, file_id, max_chars=30000)
+                ext = str(contents.get("extension") or "").lower()
+                if ext in {".jpg", ".jpeg", ".png"}:
+                    return file_id
+                if not image_only_query and str(contents.get("content") or "").strip():
+                    return file_id
+            except (WorkspaceError, OSError, ValueError):
+                continue
+
+    except Exception:
+        return None
+
+    return None
 
 
 def _detect_document_request(message: str) -> tuple[str, str] | None:
@@ -77,7 +182,7 @@ def _detect_document_request(message: str) -> tuple[str, str] | None:
     intent = re.search(
         r"\b(buat(?:kan)?|bikin|susun|siapkan|hasilkan|jadikan(?:kan)?|"
         r"jadi(?:kan)?|ekspor|export|convert|konversi|ubah(?:kan)?|"
-        r"simpan(?:kan)?)\b",
+        r"simpan(?:kan)?|review|reviu|ulas|analisis|analisa|ringkas|rangkum|koreksi|evaluasi|bedah|rekap|tulis(?:kan)?)\b",
         value,
         flags=re.IGNORECASE,
     )
@@ -99,7 +204,14 @@ def _detect_document_request(message: str) -> tuple[str, str] | None:
         flags=re.IGNORECASE,
     )
 
-    if not intent or not (document or format_only):
+    explicit_format = re.search(
+        r"\b(pdf|docx|word|doc|xlsx|excel|xls|pptx|powerpoint|power\s*point|ppt|markdown|md|txt|jpeg|jpg|png)\b",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    pure_export = bool(explicit_format) and _is_pure_export_command(value)
+    if not pure_export and (not intent or not (document or format_only or explicit_format)):
         return None
 
     # Pertanyaan CARA (bukan permintaan): "cara membuat pdf", "bagaimana
@@ -113,13 +225,14 @@ def _detect_document_request(message: str) -> tuple[str, str] | None:
         (r"\bdoc\b", "doc"),
         (r"\b(xlsx|excel)\b", "xlsx"),
         (r"\bxls\b", "xls"),
-        (r"\b(pptx|powerpoint|power\s*point)\b", "pptx"),
-        (r"\bppt\b", "ppt"),
+        (r"\b(pptx|ppt|powerpoint|power\s*point)\b", "pptx"),
         (r"\bmarkdown\b|\bmd\b", "md"),
         (r"\btxt\b|\btext\b", "txt"),
         (r"\bjpeg\b", "jpeg"),
         (r"\bjpg\b", "jpg"),
         (r"\bpng\b", "png"),
+        (r"\b(presentasi|slide|salindia)\b", "pptx"),
+        (r"\bspreadsheet\b", "xlsx"),
     ]
 
     selected_format = "docx"
@@ -154,6 +267,7 @@ def _workspace_menu_markup() -> dict:
         "keyboard": [
             [{"text": "💬 Chat AI"}, {"text": "📚 Riwayat Chat"}],
             [{"text": "📁 File Saya"}, {"text": "📄 Buat Dokumen"}],
+            [{"text": "⚙️ Automation"}],
             [{"text": "🪙 Token & Top Up"}, {"text": "👤 Profil & Bantuan"}],
             [{"text": "🏠 Menu Utama"}],
         ],
@@ -174,6 +288,7 @@ async def _send_workspace_menu(
         "📚 Riwayat Chat — percakapan sebelumnya\n"
         "📁 File Saya — layanan berkas personal\n"
         "📄 Buat Dokumen — pembuatan dokumen\n"
+        "⚙️ Automation — jalankan workflow otomatis\n"
         "🪙 Token & Top Up — kuota dan pengisian saldo\n"
         "👤 Profil & Bantuan — informasi akun dan panduan"
     )
@@ -184,52 +299,719 @@ async def _send_workspace_menu(
     )
 
 
+def _split_markdown_chunks(text: str, limit: int = 3200) -> list[str]:
+    raw = str(text or "")
+    if len(raw) <= limit:
+        return [raw]
+    chunks: list[str] = []
+    current = ""
+    for line in raw.splitlines(keepends=True):
+        if len(current) + len(line) <= limit:
+            current += line
+        else:
+            if current:
+                chunks.append(current)
+            while len(line) > limit:
+                chunks.append(line[:limit])
+                line = line[limit:]
+            current = line
+    if current:
+        chunks.append(current)
+    return chunks or [""]
+
+
+def _markdown_to_telegram_html(text: str) -> str:
+    import html as _html
+    import re as _re
+
+    src = str(text or "")
+    stash: list[str] = []
+
+    def _put(html_snippet: str) -> str:
+        token = f"\x00CODE{len(stash)}\x00"
+        stash.append(html_snippet)
+        return token
+
+    src = _re.sub(
+        r"```[a-zA-Z0-9_-]*\n([\s\S]*?)```",
+        lambda m: _put(f"<pre>{_html.escape(m.group(1).strip(), quote=False)}</pre>"),
+        src,
+    )
+    src = _re.sub(
+        r"`([^`\n]+)`",
+        lambda m: _put(f"<code>{_html.escape(m.group(1), quote=False)}</code>"),
+        src,
+    )
+
+    src = _html.escape(src, quote=False)
+    src = _re.sub(r"(?m)^\s*\|[\s:|-]+\|\s*$\n?", "", src)
+
+    def _table_row(m: _re.Match) -> str:
+        cells = [c.strip() for c in m.group(1).strip("|").split("|") if c.strip()]
+        if not cells:
+            return ""
+        if len(cells) == 2:
+            return f"• <b>{cells[0]}</b>: {cells[1]}"
+        return "• " + " | ".join(cells)
+
+    src = _re.sub(r"(?m)^\s*(\|.+\|)\s*$", _table_row, src)
+    src = _re.sub(
+        r"(?m)^\s{0,3}#{1,6}\s+(.+)$",
+        lambda m: f"\n<b>{m.group(1).strip().strip('*').strip()}</b>",
+        src,
+    )
+    src = _re.sub(r"(?m)^\s*[-*_]{3,}\s*$", "──────────", src)
+    src = _re.sub(r"(?m)^[ \t]{1,}[-*•]\s+(.+)$", r"  ◦ \1", src)
+    src = _re.sub(r"(?m)^[-*]\s+(.+)$", r"• \1", src)
+    src = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", src)
+    src = _re.sub(r"__(.+?)__", r"<b>\1</b>", src)
+    src = _re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"<i>\1</i>", src)
+    src = _re.sub(r"\n{3,}", "\n\n", src).strip()
+
+    for idx, snippet in enumerate(stash):
+        src = src.replace(f"\x00CODE{idx}\x00", snippet)
+    return src
+
+
+def _filesaya_delete_inline_markup(user_id: str, limit: int = 10) -> dict | None:
+    """Buat inline keyboard tombol Hapus per file (maksimal 10 file terbaru agar rapi di Telegram)."""
+    try:
+        from app.services.workspace_service import list_files
+
+        files = list_files(user_id, limit=100)
+        rows = []
+        for item in files[:limit]:
+            fid = str(item.get("id") or "").strip()
+            name = str(item.get("name") or item.get("filename") or fid).strip()
+            if not fid or len(f"fcdel:{fid}".encode("utf-8")) > 64:
+                continue
+            label_name = name if len(name) <= 28 else f"{name[:25]}..."
+            rows.append([
+                {
+                    "text": f"🗑️ Hapus {label_name}",
+                    "callback_data": f"fdel:{fid}",
+                }
+            ])
+        if not rows:
+            return None
+        return {"inline_keyboard": rows}
+    except Exception:
+        return None
+
+
+async def _send_raw_telegram_method(method: str, payload: dict) -> dict | None:
+    """Panggil method Telegram Bot API secara langsung (mis. answerCallbackQuery / sendMessage)."""
+    import httpx
+
+    if not OMAI_TELEGRAM_BOT_TOKEN:
+        return None
+    url = f"https://api.telegram.org/bot{OMAI_TELEGRAM_BOT_TOKEN}/{method}"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code == 200:
+                return resp.json()
+            return None
+    except httpx.HTTPError:
+        return None
+
+
+async def _handle_filesaya_callback(
+    callback_query: dict,
+    db: Session,
+) -> dict | None:
+    """Tangani klik tombol inline Hapus pada menu File Saya."""
+    cb_id = str(callback_query.get("id") or "")
+    data = str(callback_query.get("data") or "")
+    sender = callback_query.get("from") or {}
+    msg = callback_query.get("message") or {}
+    chat = msg.get("chat") or {}
+
+    if not data.startswith(("fdel:", "fcdel:", "fcancel:")):
+        return None
+
+    sender_id = sender.get("id")
+    chat_id = chat.get("id")
+    if (
+        chat.get("type") != "private"
+        or not isinstance(sender_id, int)
+        or isinstance(sender_id, bool)
+        or not isinstance(chat_id, int)
+        or isinstance(chat_id, bool)
+        or sender_id != chat_id
+    ):
+        await _send_raw_telegram_method(
+            "answerCallbackQuery",
+            {"callback_query_id": cb_id, "text": "Hanya tersedia di chat pribadi.", "show_alert": True},
+        )
+        return {"ok": True, "ignored": True}
+
+    link = (
+        db.query(TelegramCentralLink)
+        .filter(
+            TelegramCentralLink.telegram_user_id == sender_id,
+            TelegramCentralLink.is_active.is_(True),
+        )
+        .first()
+    )
+    user = db.get(User, link.user_id) if link and link.user_id else None
+    if not link or not user or not user.is_active or user.status != "active":
+        await _send_raw_telegram_method(
+            "answerCallbackQuery",
+            {"callback_query_id": cb_id, "text": "Akun Telegram belum terhubung.", "show_alert": True},
+        )
+        return {"ok": True, "unlinked": True}
+
+    if data.startswith("fcancel:"):
+        await _send_raw_telegram_method(
+            "answerCallbackQuery",
+            {"callback_query_id": cb_id, "text": "Penghapusan dibatalkan."},
+        )
+        markup = _filesaya_delete_inline_markup(user.id)
+        await _send_raw_telegram_method(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": list_user_files(user.id),
+                **({"reply_markup": markup} if markup else {}),
+            },
+        )
+        return {"ok": True, "cancelled": True}
+
+    if data.startswith("fdel:"):
+        fid = data.split(":", 1)[1].strip()
+        fname = fid
+        try:
+            from app.services.workspace_service import list_files
+            for item in list_files(user.id, limit=100):
+                if str(item.get("id") or "") == fid:
+                    fname = str(item.get("name") or fid)
+                    break
+        except Exception:
+            pass
+
+        await _send_raw_telegram_method(
+            "answerCallbackQuery",
+            {"callback_query_id": cb_id, "text": "Konfirmasi hapus file"},
+        )
+        await _send_raw_telegram_method(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": f"⚠️ Yakin ingin menghapus file <b>{fname}</b>?",
+                "parse_mode": "HTML",
+                "reply_markup": {
+                    "inline_keyboard": [[
+                        {"text": "✅ Ya, Hapus", "callback_data": f"fcdel:{fid}"},
+                        {"text": "❌ Batal", "callback_data": f"fcancel:{fid}"},
+                    ]]
+                },
+            },
+        )
+        return {"ok": True, "confirmation_sent": True}
+
+    fid = data.split(":", 1)[1].strip()
+    dummy_update = TelegramCentralUpdate(
+        update_id=int(str(callback_query.get("id") or "0").isdigit() and callback_query["id"] or 0),
+        telegram_user_id=sender_id,
+        telegram_message_id=msg.get("message_id"),
+        status="processing",
+    )
+    await _handle_filesaya_command(f"/hapus_file {fid}", db, user, chat_id, dummy_update)
+    await _send_raw_telegram_method(
+        "answerCallbackQuery",
+        {"callback_query_id": cb_id, "text": "File telah dihapus."},
+    )
+    markup = _filesaya_delete_inline_markup(user.id)
+    await _send_raw_telegram_method(
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": list_user_files(user.id),
+            **({"reply_markup": markup} if markup else {}),
+        },
+    )
+    return {"ok": True, "deleted": True}
+
+
 async def _send_message(
     chat_id: int,
     text: str,
     reply_markup: dict | None = None,
 ) -> bool | None:
-    """Kirim pesan melalui bot pusat.
+    """Kirim pesan melalui bot pusat dengan format Telegram HTML rapi."""
+    import html as _html
+    import re as _re
 
-    True  = seluruh bagian terkonfirmasi terkirim.
-    False = kegagalan ditolak secara eksplisit sebelum ada bagian terkirim.
-    None  = hasil tidak pasti; jangan mengirim ulang otomatis.
-    """
     if not OMAI_TELEGRAM_BOT_TOKEN:
         return False
 
-    chunks = [
-        text[index:index + 4000]
-        for index in range(0, len(text), 4000)
-    ] or [""]
-
+    chunks = _split_markdown_chunks(text, limit=3200)
     sent_any = False
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            for chunk in chunks:
-                payload_data = {"chat_id": chat_id, "text": chunk}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for idx, raw_chunk in enumerate(chunks):
+                html_chunk = _markdown_to_telegram_html(raw_chunk)
+                use_html = True
+                payload_data: dict = {
+                    "chat_id": chat_id,
+                    "text": html_chunk,
+                    "parse_mode": "HTML",
+                }
                 if reply_markup is not None and len(chunks) == 1:
                     payload_data["reply_markup"] = reply_markup
 
-                response = await client.post(
-                    f"https://api.telegram.org/bot{OMAI_TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json=payload_data,
-                )
+                delivered = False
+                for attempt in range(3):
+                    try:
+                        response = await client.post(
+                            f"https://api.telegram.org/bot{OMAI_TELEGRAM_BOT_TOKEN}/sendMessage",
+                            json=payload_data,
+                        )
+                        if response.status_code == 200:
+                            payload = response.json()
+                            if isinstance(payload, dict) and payload.get("ok"):
+                                delivered = True
+                                break
+                            print(f"[telegram] sendMessage not ok (chunk {idx}): {payload}", flush=True)
+                            return None if sent_any else False
 
-                if response.status_code != 200:
+                        if response.status_code == 400 and use_html:
+                            use_html = False
+                            plain_text = _html.unescape(_re.sub(r"<[^>]+>", "", html_chunk))
+                            payload_data = {"chat_id": chat_id, "text": plain_text[:4000]}
+                            if reply_markup is not None and len(chunks) == 1:
+                                payload_data["reply_markup"] = reply_markup
+                            continue
+
+                        print(f"[telegram] sendMessage HTTP {response.status_code} (chunk {idx}): {response.text[:200]}", flush=True)
+                        if response.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                            continue
+                        return None if sent_any else False
+
+                    except (httpx.RequestError, ValueError) as exc:
+                        print(f"[telegram] sendMessage error (chunk {idx}, attempt {attempt + 1}): {type(exc).__name__}: {exc}", flush=True)
+                        if attempt < 2:
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                            continue
+                        return None
+
+                if not delivered:
                     return None if sent_any else False
-
-                payload = response.json()
-                if not isinstance(payload, dict) or not payload.get("ok"):
-                    return None if sent_any else False
-
                 sent_any = True
 
         return True
 
-    except (httpx.RequestError, ValueError):
+    except Exception as exc:
+        print(f"[telegram] sendMessage unexpected error: {type(exc).__name__}: {exc}", flush=True)
         return None
+
+
+
+def _automation_inline_markup(items: list[dict], limit: int = 10) -> dict | None:
+    rows = []
+    for item in items[:limit]:
+        wf_id = str(item.get("id") or "").strip()
+        wf_name = str(item.get("name") or "Workflow").strip()
+        cb_data = f"arun:{wf_id}"
+        if not wf_id or len(cb_data.encode("utf-8")) > 64:
+            continue
+        label = wf_name if len(wf_name) <= 28 else f"{wf_name[:25]}..."
+        rows.append([{"text": f"\u25b6\ufe0f {label}", "callback_data": cb_data}])
+    if not rows:
+        return None
+    rows.append([{"text": "\U0001f9fe Riwayat Eksekusi", "callback_data": "ahist"}])
+    return {"inline_keyboard": rows}
+
+
+async def _handle_automation_callback(
+    callback_query: dict,
+    db: Session,
+) -> dict | None:
+    cb_id = str(callback_query.get("id") or "")
+    data = str(callback_query.get("data") or "")
+    sender = callback_query.get("from") or {}
+    msg = callback_query.get("message") or {}
+    chat = msg.get("chat") or {}
+
+    if not (data == "ahist" or data.startswith("arun:")):
+        return None
+
+    sender_id = sender.get("id")
+    chat_id = chat.get("id")
+    if (
+        chat.get("type") != "private"
+        or not isinstance(sender_id, int)
+        or isinstance(sender_id, bool)
+        or not isinstance(chat_id, int)
+        or isinstance(chat_id, bool)
+        or sender_id != chat_id
+    ):
+        await _send_raw_telegram_method(
+            "answerCallbackQuery",
+            {"callback_query_id": cb_id, "text": "Hanya di chat pribadi.", "show_alert": True},
+        )
+        return {"ok": True, "ignored": True}
+
+    link = (
+        db.query(TelegramCentralLink)
+        .filter(
+            TelegramCentralLink.telegram_user_id == sender_id,
+            TelegramCentralLink.is_active.is_(True),
+        )
+        .first()
+    )
+    user = db.get(User, link.user_id) if link and link.user_id else None
+    if not link or not user or not user.is_active or user.status != "active":
+        await _send_raw_telegram_method(
+            "answerCallbackQuery",
+            {"callback_query_id": cb_id, "text": "Akun belum terhubung.", "show_alert": True},
+        )
+        return {"ok": True, "unlinked": True}
+
+    dummy_update = TelegramCentralUpdate(
+        update_id=0,
+        telegram_user_id=sender_id,
+        telegram_message_id=msg.get("message_id"),
+        status="processing",
+    )
+
+    if data == "ahist":
+        await _send_raw_telegram_method(
+            "answerCallbackQuery",
+            {"callback_query_id": cb_id, "text": "Memuat riwayat..."},
+        )
+        await _handle_automation_command(
+            text="/automation_history",
+            command="/automation_history",
+            db=db,
+            user=user,
+            chat_id=chat_id,
+            update=dummy_update,
+        )
+        return {"ok": True, "automation_history": True}
+
+    wf_id = data.split(":", 1)[1].strip()
+    target_wf = None
+    try:
+        avail = list_available_workflows(current_user=user, db=db)
+        for item in avail.get("items", []):
+            if str(item.get("id") or "") == wf_id:
+                target_wf = item
+                break
+    except Exception:
+        target_wf = None
+
+    if target_wf is None:
+        await _send_raw_telegram_method(
+            "answerCallbackQuery",
+            {"callback_query_id": cb_id, "text": "Workflow tidak ditemukan.", "show_alert": True},
+        )
+        return {"ok": True, "automation_not_found": True}
+
+    schema = target_wf.get("input_schema") or {}
+    properties = schema.get("properties") or {}
+    required = list(schema.get("required") or [])
+
+    if required:
+        sample_payload = {k: f"isi_{k}" for k in properties.keys()}
+        sample_json = json.dumps(sample_payload, ensure_ascii=False)
+        await _send_raw_telegram_method(
+            "answerCallbackQuery",
+            {"callback_query_id": cb_id, "text": "Butuh parameter input."},
+        )
+        msg_text = (
+            "\u2699\ufe0f " + str(target_wf.get("name", "Workflow"))
+            + " membutuhkan parameter wajib: " + ", ".join(required)
+            + "\n\nSalin dan sesuaikan nilai perintah berikut lalu kirim:\n"
+            + f"/automation_run {wf_id} {sample_json}"
+        )
+        await _send_message(chat_id, msg_text, reply_markup=_workspace_menu_markup())
+        return {"ok": True, "automation_prompt_params": True}
+
+    await _send_raw_telegram_method(
+        "answerCallbackQuery",
+        {"callback_query_id": cb_id, "text": "Menjalankan workflow..."},
+    )
+    await _handle_automation_command(
+        text=f"/automation_run {wf_id}",
+        command="/automation_run",
+        db=db,
+        user=user,
+        chat_id=chat_id,
+        update=dummy_update,
+    )
+    return {"ok": True, "automation_executed": True}
+
+
+async def _handle_automation_command(
+    text: str,
+    command: str,
+    db: Session,
+    user: User,
+    chat_id: int,
+    update: TelegramCentralUpdate,
+):
+    """Menjalankan fitur Automation melalui fungsi backend yang sama dengan web."""
+
+    update.user_id = user.id
+    db.commit()
+
+    response = ""
+    ambiguous_result = False
+
+    try:
+        if command in {"/automation", "⚙️ automation"}:
+            result = list_available_workflows(current_user=user, db=db)
+            items = result.get("items", [])
+
+            if not items:
+                response = (
+                    "⚙️ AUTOMATION\n\n"
+                    "Belum ada workflow yang tersedia untuk akun Anda.\n"
+                    "Jika seharusnya Anda memiliki akses, hubungi Admin "
+                    "untuk memeriksa izin workflow."
+                )
+            else:
+                lines = [
+                    "⚙️ DAFTAR AUTOMATION",
+                    "",
+                    f"Workflow yang dapat Anda gunakan: {len(items)}",
+                    "",
+                ]
+
+                for index, item in enumerate(items, start=1):
+                    lines.extend([
+                        f"{index}. {item.get('name', 'Workflow')}",
+                        f"   ID: {item['id']}",
+                    ])
+
+                    description = str(item.get("description") or "").strip()
+                    if description:
+                        lines.append("   " + description[:250])
+
+                    schema = item.get("input_schema") or {}
+                    properties = schema.get("properties") or {}
+                    required = set(schema.get("required") or [])
+
+                    if properties:
+                        fields = []
+                        for key, definition in list(properties.items())[:15]:
+                            suffix = " (wajib)" if key in required else ""
+                            fields.append(f"{key}{suffix}")
+                        lines.append("   Input: " + ", ".join(fields))
+                    else:
+                        lines.append("   Input: tidak ada parameter")
+
+                    lines.append("")
+
+                lines.extend([
+                    "▶️ MENJALANKAN WORKFLOW",
+                    "Gunakan format:",
+                    "/automation_run ID_WORKFLOW",
+                    "",
+                    "Jika membutuhkan input:",
+                    '/automation_run ID_WORKFLOW {"parameter":"nilai"}',
+                    "",
+                    "Atau klik tombol workflow di bawah ini untuk menjalankan langsung:",
+                ])
+                response = "\n".join(lines)
+                auto_markup = _automation_inline_markup(items)
+                if auto_markup:
+                    sent = await _send_raw_telegram_method(
+                        "sendMessage",
+                        {"chat_id": chat_id, "text": response[:4000], "reply_markup": auto_markup},
+                    )
+                    update.status = "completed" if sent else "failed"
+                    update.error_code = None if sent else "telegram_automation_delivery_failed"
+                    update.completed_at = _utc_now()
+                    db.commit()
+                    return {"ok": True, "automation": True, "reply_sent": bool(sent), "status": update.status}
+
+        elif command == "/automation_history":
+            result = list_my_executions(
+                limit=10,
+                current_user=user,
+                db=db,
+            )
+            items = result.get("items", [])
+
+            if not items:
+                response = (
+                    "🧾 RIWAYAT AUTOMATION\n\n"
+                    "Belum ada riwayat eksekusi."
+                )
+            else:
+                status_labels = {
+                    "completed": "✅ Berhasil",
+                    "failed": "❌ Gagal",
+                    "running": "⏳ Berjalan",
+                    "unknown": "⚠️ Perlu diperiksa",
+                }
+                lines = ["🧾 RIWAYAT AUTOMATION", ""]
+
+                for index, item in enumerate(items, start=1):
+                    created = item.get("created_at")
+                    date_text = (
+                        created.strftime("%d-%m-%Y %H:%M")
+                        if created else "-"
+                    )
+                    status = str(item.get("status") or "unknown")
+                    lines.extend([
+                        f"{index}. {item.get('workflow_name') or 'Workflow'}",
+                        f"   Status: {status_labels.get(status, status)}",
+                        f"   Waktu: {date_text}",
+                        f"   ID eksekusi: {item.get('id')}",
+                    ])
+
+                    if item.get("duration_ms") is not None:
+                        lines.append(
+                            f"   Durasi: {item['duration_ms']} ms"
+                        )
+
+                    if item.get("result_data") is not None:
+                        preview = json.dumps(
+                            item["result_data"],
+                            ensure_ascii=False,
+                            default=str,
+                        )
+                        lines.append("   Hasil: " + preview[:900])
+
+                    if item.get("error_message"):
+                        lines.append(
+                            "   Keterangan: "
+                            + str(item["error_message"])[:300]
+                        )
+
+                    lines.append("")
+
+                response = "\n".join(lines)
+
+        elif command == "/automation_run":
+            parts = text.strip().split(maxsplit=2)
+
+            if len(parts) < 2:
+                response = (
+                    "Format perintah belum lengkap.\n\n"
+                    "/automation_run ID_WORKFLOW\n"
+                    '/automation_run ID_WORKFLOW {"parameter":"nilai"}\n\n'
+                    "Gunakan /automation untuk melihat daftar workflow."
+                )
+            else:
+                workflow_id = parts[1]
+                input_data = {}
+
+                if len(parts) == 3:
+                    try:
+                        input_data = json.loads(parts[2])
+                    except (ValueError, TypeError):
+                        response = (
+                            "Input JSON tidak valid. Periksa tanda kutip, "
+                            "kurung kurawal, dan format JSON."
+                        )
+
+                    if not response and not isinstance(input_data, dict):
+                        response = (
+                            "Input harus berupa objek JSON, "
+                            'contoh: {"nama":"Budi"}.'
+                        )
+
+                if not response:
+                    result = await execute_automation_workflow(
+                        workflow_id,
+                        AutomationExecuteRequest(input_data=input_data),
+                        current_user=user,
+                        db=db,
+                    )
+
+                    execution = result.get("execution") or {}
+                    status = execution.get("status", "unknown")
+                    execution_id = execution.get("id", "-")
+
+                    if status == "completed" and result.get("success"):
+                        response = (
+                            "✅ AUTOMATION BERHASIL\n\n"
+                            f"Workflow: {execution.get('workflow_name', '-')}"
+                            f"\nID eksekusi: {execution_id}"
+                        )
+                    elif status == "unknown":
+                        ambiguous_result = True
+                        response = (
+                            "⚠️ STATUS EKSEKUSI BELUM DAPAT DIPASTIKAN\n\n"
+                            f"Workflow: {execution.get('workflow_name', '-')}"
+                            f"\nID eksekusi: {execution_id}\n\n"
+                            "Periksa /automation_history atau hubungi Admin. "
+                            "Jangan jalankan ulang sebelum statusnya dipastikan."
+                        )
+                    else:
+                        response = (
+                            "❌ AUTOMATION GAGAL\n\n"
+                            f"Workflow: {execution.get('workflow_name', '-')}"
+                            f"\nID eksekusi: {execution_id}"
+                            f"\nKeterangan: {result.get('message') or 'Eksekusi gagal.'}"
+                        )
+
+                    if execution.get("result_data") is not None:
+                        preview = json.dumps(
+                            execution["result_data"],
+                            ensure_ascii=False,
+                            default=str,
+                        )
+                        response += "\n\nHasil:\n" + preview[:1800]
+
+        else:
+            response = (
+                "Perintah Automation tidak dikenal. "
+                "Gunakan /automation, /automation_run, "
+                "atau /automation_history."
+            )
+
+    except HTTPException as exc:
+        response = "Permintaan Automation ditolak: " + str(exc.detail)[:500]
+        # Kesalahan server saat menyimpan status eksekusi bisa terjadi
+        # setelah webhook n8n telah dipanggil. Jangan menganggap aman diulang.
+        if exc.status_code >= 500:
+            ambiguous_result = True
+
+    except Exception:
+        response = (
+            "Automation mengalami kendala internal. "
+            "Periksa /automation_history sebelum mencoba kembali."
+        )
+        ambiguous_result = True
+
+    delivered = await _send_message(
+        chat_id,
+        response,
+        reply_markup=_workspace_menu_markup(),
+    )
+
+    if delivered is True:
+        update.status = "completed"
+        update.error_code = None
+    elif delivered is False:
+        update.status = "needs_review" if ambiguous_result else "failed"
+        update.error_code = "telegram_automation_delivery_failed"
+    else:
+        update.status = "needs_review"
+        update.error_code = "telegram_automation_delivery_uncertain"
+
+    # needs_review berarti hasil operasi/pengiriman belum pasti.
+    # Jangan menandainya sebagai selesai agar tidak memberi kesan
+    # bahwa pengiriman Telegram telah terkonfirmasi.
+    update.completed_at = (
+        None if update.status == "needs_review" else _utc_now()
+    )
+    db.commit()
+
+    return {
+        "ok": True,
+        "automation": True,
+        "reply_sent": delivered,
+        "status": update.status,
+    }
 
 
 def _record_update(
@@ -496,6 +1278,8 @@ async def _deliver_saved_reply_locked(
             ):
                 raise ValueError("document_content_missing_or_invalid")
 
+            update.document_title = resolve_document_title(update.document_title, update.document_content, conversation_id=getattr(update, "conversation_id", None) or getattr(assistant_message, "conversation_id", None), db=db, pure_export_checker=_is_pure_export_command, conv_model=globals().get("Conversation"))
+
             create_user_document(
                 db=db,
                 user=user,
@@ -759,10 +1543,10 @@ async def _handle_filesaya_command(
     chat_id: int,
     update: TelegramCentralUpdate,
 ) -> bool:
-    """Tangani perintah File Saya; True jika perintah dikenali."""
+    """Tangani File Saya dengan pencatatan hasil pengiriman Telegram."""
     raw = command_text.strip()
     parts = raw.split(maxsplit=1)
-    command = parts[0].split("@", 1)[0].lower() if parts else ""
+    command = parts[0].split("@", 1)[0].lower() if parts else "" if parts else "" if parts else ""
     argument = parts[1].strip() if len(parts) == 2 else ""
 
     supported = {
@@ -776,7 +1560,10 @@ async def _handle_filesaya_command(
 
     update.user_id = user.id
     db.commit()
+
     reply = ""
+    operation_error = None
+    file_delivery = None
 
     try:
         if command == "/daftar_file":
@@ -809,8 +1596,20 @@ async def _handle_filesaya_command(
             else:
                 extension = get_user_file_extension(user.id, argument)
                 if extension in {".jpg", ".jpeg", ".png"}:
-                    await send_user_image_preview(chat_id, user.id, argument)
-                    reply = f"Preview gambar untuk file ID {argument}."
+                    file_delivery = await send_user_image_preview(
+                        chat_id, user.id, argument
+                    )
+                    if file_delivery is True:
+                        reply = f"Preview gambar untuk file ID {argument} berhasil dikirim."
+                    elif file_delivery is False:
+                        operation_error = "telegram_file_delivery_failed"
+                        reply = "Telegram menolak pengiriman preview gambar. Silakan periksa file dan coba kembali."
+                    else:
+                        update.status = "needs_review"
+                        update.error_code = "telegram_file_delivery_uncertain"
+                        update.completed_at = None
+                        db.commit()
+                        return True
                 else:
                     reply = preview_user_file(user.id, argument)
 
@@ -818,14 +1617,28 @@ async def _handle_filesaya_command(
             if not argument:
                 reply = "Format: /unduh ID_FILE"
             else:
-                await send_user_file(chat_id, user.id, argument)
-                reply = f"File dengan ID {argument} telah dikirim."
+                file_delivery = await send_user_file(
+                    chat_id, user.id, argument
+                )
+                if file_delivery is True:
+                    reply = f"File dengan ID {argument} berhasil dikirim."
+                elif file_delivery is False:
+                    operation_error = "telegram_file_delivery_failed"
+                    reply = "Telegram menolak pengiriman file. Silakan periksa file dan coba kembali."
+                else:
+                    update.status = "needs_review"
+                    update.error_code = "telegram_file_delivery_uncertain"
+                    update.completed_at = None
+                    db.commit()
+                    return True
 
         elif command == "/rename_file":
             if "|" not in argument:
                 reply = "Format: /rename_file ID_FILE|nama_baru.ext"
             else:
-                file_id, new_name = (part.strip() for part in argument.split("|", 1))
+                file_id, new_name = (
+                    part.strip() for part in argument.split("|", 1)
+                )
                 reply = rename_user_file(user.id, file_id, new_name)
 
         elif command == "/rename_folder":
@@ -859,18 +1672,53 @@ async def _handle_filesaya_command(
 
     except WorkspaceError as exc:
         reply = str(exc)
+        operation_error = "workspace_operation_failed"
     except (ValueError, OSError):
         reply = "Operasi File Saya gagal. Periksa kembali ID, nama, atau lokasi file."
+        operation_error = "workspace_operation_failed"
 
-    update.status = "completed"
-    update.error_code = None
-    update.completed_at = _utc_now()
+    # Jangan menganggap pesan balasan berhasil sebelum Telegram mengonfirmasi.
+    delivered = await _send_message(
+        chat_id,
+        reply,
+        reply_markup=_workspace_menu_markup(),
+    ) if reply else True
+
+    if delivered is None:
+        update.status = "needs_review"
+        update.error_code = (
+            "telegram_file_confirmation_uncertain"
+            if file_delivery is True
+            else "telegram_file_reply_uncertain"
+        )
+        update.completed_at = None
+
+    elif delivered is False:
+        update.status = "failed"
+        update.error_code = (
+            "telegram_file_confirmation_failed"
+            if file_delivery is True
+            else "telegram_file_reply_failed"
+        )
+        update.completed_at = _utc_now()
+
+    elif operation_error:
+        update.status = "failed"
+        update.error_code = operation_error
+        update.completed_at = _utc_now()
+
+    elif file_delivery is False:
+        update.status = "failed"
+        update.error_code = "telegram_file_delivery_failed"
+        update.completed_at = _utc_now()
+
+    else:
+        update.status = "completed"
+        update.error_code = None
+        update.completed_at = _utc_now()
+
     db.commit()
-
-    if reply:
-        await _send_message(chat_id, reply, reply_markup=_workspace_menu_markup())
     return True
-
 
 @router.post("/webhook")
 async def central_telegram_webhook(
@@ -902,6 +1750,15 @@ async def central_telegram_webhook(
     update_id = payload.get("update_id")
     if isinstance(update_id, bool) or not isinstance(update_id, int):
         raise HTTPException(status_code=400, detail="Update ID tidak valid.")
+
+    callback_query = payload.get("callback_query")
+    if isinstance(callback_query, dict):
+        cb_res = await _handle_filesaya_callback(callback_query, db)
+        if cb_res is not None:
+            return cb_res
+        auto_cb_res = await _handle_automation_callback(callback_query, db)
+        if auto_cb_res is not None:
+            return auto_cb_res
 
     message = payload.get("message")
     if not isinstance(message, dict):
@@ -967,7 +1824,7 @@ async def central_telegram_webhook(
         text = ""
 
     parts = text.strip().split(maxsplit=1)
-    command = parts[0].split("@", 1)[0].lower()
+    command = parts[0].split("@", 1)[0].lower() if parts else ""
 
     if command == "/start":
         code = parts[1].strip() if len(parts) == 2 else ""
@@ -1190,14 +2047,20 @@ async def central_telegram_webhook(
         db.commit()
         try:
             reply = await upload_telegram_document(db, user, photo_document)
-            update.status = "completed"
-            update.error_code = None
-            update.completed_at = _utc_now()
-            db.commit()
-            await _send_message(
-                chat_id, reply, reply_markup=_workspace_menu_markup()
-            )
-            return {"ok": True, "file_uploaded": True, "photo": True}
+            caption_cmd = str(message.get("caption") or "").strip()
+            if caption_cmd and not caption_cmd.startswith("/"):
+                await _send_message(chat_id, reply)
+                text = caption_cmd
+                command = ""
+            else:
+                update.status = "completed"
+                update.error_code = None
+                update.completed_at = _utc_now()
+                db.commit()
+                await _send_message(
+                    chat_id, reply, reply_markup=_workspace_menu_markup()
+                )
+                return {"ok": True, "file_uploaded": True, "photo": True}
         except WorkspaceError as exc:
             update.status = "completed"
             update.error_code = "file_upload_rejected"
@@ -1219,8 +2082,7 @@ async def central_telegram_webhook(
             )
             return {"ok": True, "file_uploaded": False, "photo": True}
 
-    media_keys = (
-        "photo", "video", "animation", "audio", "voice",
+    media_keys = ( "video", "animation", "audio", "voice",
         "video_note", "sticker",
     )
     if any(key in message for key in media_keys):
@@ -1251,6 +2113,28 @@ async def central_telegram_webhook(
 
     menu_choice = text.strip()
 
+    if (
+        command in {"/automation", "/automation_run", "/automation_history"}
+        or menu_choice == "⚙️ Automation"
+    ):
+        automation_command = (
+            command
+            if command in {
+                "/automation",
+                "/automation_run",
+                "/automation_history",
+            }
+            else "⚙️ automation"
+        )
+        return await _handle_automation_command(
+            text=text,
+            command=automation_command,
+            db=db,
+            user=user,
+            chat_id=chat_id,
+            update=update,
+        )
+
     if command == "/menu" or menu_choice in {"🏠 Menu Utama", "Menu Utama"}:
         update.user_id = user.id
         update.status = "completed"
@@ -1272,6 +2156,393 @@ async def central_telegram_webhook(
         )
         return {"ok": True, "chat_ready": True}
 
+    if menu_choice == "📚 Riwayat Chat":
+        update.user_id = user.id
+        update.status = "completed"
+        update.completed_at = _utc_now()
+        db.commit()
+
+        conversations = (
+            db.query(Conversation)
+            .filter(Conversation.user_id == user.id)
+            .order_by(Conversation.updated_at.desc())
+            .limit(10)
+            .all()
+        )
+
+        if not conversations:
+            history_text = (
+                "📚 RIWAYAT CHAT\n\n"
+                "Belum ada percakapan tersimpan."
+            )
+        else:
+            lines = [
+                "📚 RIWAYAT CHAT",
+                "",
+                "10 percakapan terakhir:",
+                "",
+            ]
+
+            for index, conv in enumerate(conversations, start=1):
+                title = (conv.title or "Percakapan").strip()
+                updated = (
+                    conv.updated_at.strftime("%d-%m-%Y %H:%M")
+                    if conv.updated_at else "-"
+                )
+                lines.append(f"{index}. {title[:150]}")
+                lines.append(f"   🕒 {updated}")
+                lines.append("")
+
+            history_text = "\n".join(lines)
+
+        await _send_message(
+            chat_id,
+            history_text,
+            reply_markup=_workspace_menu_markup(),
+        )
+        return {"ok": True, "history_list": True}
+
+    if menu_choice == "🪙 Token & Top Up":
+        update.user_id = user.id
+        update.status = "completed"
+        update.completed_at = _utc_now()
+        db.commit()
+
+        lines = [
+            "🪙 TOKEN & TOP UP ONE MASTER AI",
+            "",
+        ]
+
+        if user.role == "admin":
+            lines.extend([
+                "👑 STATUS AKUN ADMIN",
+                "Kuota AI: Tanpa batas",
+                "",
+                "Saldo Top Up: Tidak berlaku untuk akun Admin.",
+                "Pemakaian harian: Tidak dibatasi.",
+                "Sisa kuota harian: Tidak terbatas.",
+                "",
+                "Pengelolaan saldo dan Top Up pengguna tersedia "
+                "melalui Panel Admin web app.",
+            ])
+        else:
+            # Menggunakan perhitungan yang sama dengan GET /api/v1/quota.
+            daily_limit, daily_used = daily_token_usage(db, user)
+            daily_remaining = (
+                max(0, daily_limit - daily_used)
+                if daily_limit is not None else None
+            )
+
+            wallet = (
+                db.query(TokenWallet)
+                .filter(TokenWallet.user_id == user.id)
+                .first()
+            )
+            balance = int(wallet.topup_balance or 0) if wallet else 0
+
+            used_percent = (
+                min(100, (daily_used / daily_limit) * 100)
+                if daily_limit and daily_limit > 0 else 0
+            )
+
+            lines.extend([
+                "📊 KUOTA AI HARI INI",
+                f"Pemakaian hari ini: {daily_used:,}".replace(",", ".")
+                + " token",
+                "Batas harian: "
+                + (
+                    f"{daily_limit:,}".replace(",", ".") + " token"
+                    if daily_limit is not None else "Tanpa batas"
+                ),
+                "Persentase pemakaian: "
+                + f"{used_percent:.1f}%".replace(".", ","),
+                "Sisa batas harian: "
+                + (
+                    f"{daily_remaining:,}".replace(",", ".") + " token"
+                    if daily_remaining is not None else "Tidak terbatas"
+                ),
+                "",
+            ])
+
+            if balance < 0:
+                lines.extend([
+                    "🔴 UTANG TOP UP",
+                    f"{abs(balance):,}".replace(",", ".")
+                    + " token (belum lunas)",
+                    "Akses AI diblokir sampai utang dilunasi "
+                    "melalui Top Up atau kredit Admin.",
+                ])
+            else:
+                lines.extend([
+                    "💰 SALDO TOP UP",
+                    f"{balance:,}".replace(",", ".") + " token",
+                ])
+
+            lines.extend(["", "📦 PAKET TOP UP AKTIF"])
+
+            plans = (
+                db.query(SubscriptionPlan)
+                .filter(SubscriptionPlan.is_active.is_(True))
+                .order_by(
+                    SubscriptionPlan.sort_order.asc(),
+                    SubscriptionPlan.name.asc(),
+                )
+                .all()
+            )
+
+            if not plans:
+                lines.append("Belum ada paket Top Up yang aktif.")
+            else:
+                now_wit = wit_now()
+
+                for index, plan in enumerate(plans, start=1):
+                    active_users = (
+                        db.query(UserSubscription.user_id)
+                        .filter(
+                            UserSubscription.plan_id == plan.id,
+                            UserSubscription.status == "active",
+                            UserSubscription.current_period_start <= now_wit,
+                            UserSubscription.current_period_end > now_wit,
+                        )
+                        .distinct()
+                        .count()
+                    )
+
+                    max_users = (
+                        int(plan.max_users)
+                        if plan.max_users is not None else None
+                    )
+                    is_full = (
+                        max_users is not None
+                        and active_users >= max_users
+                    )
+
+                    price = f"Rp{int(plan.price_idr):,}".replace(",", ".")
+                    token_amount = (
+                        f"{int(plan.token_amount):,}".replace(",", ".")
+                    )
+                    daily_limit_text = (
+                        f"{int(plan.daily_token_limit):,}".replace(",", ".")
+                    )
+
+                    lines.extend([
+                        "",
+                        f"{index}. {plan.name}",
+                        f"   Harga: {price}",
+                        f"   Token: {token_amount} token",
+                        f"   Batas harian: {daily_limit_text} token",
+                        f"   Masa aktif: {int(plan.duration_days)} hari",
+                    ])
+
+                    if max_users is None:
+                        lines.append(
+                            f"   Pengguna aktif: {active_users} "
+                            "· Tanpa batas kapasitas"
+                        )
+                    else:
+                        available_slots = max(
+                            0, max_users - active_users
+                        )
+                        lines.append(
+                            f"   Pengguna aktif: {active_users}/{max_users}"
+                            f" · Sisa slot: {available_slots}"
+                        )
+
+                    if is_full:
+                        lines.append("   🔴 Kapasitas penuh")
+                    else:
+                        lines.append("   🟢 Kapasitas tersedia")
+
+                    if plan.qris_image:
+                        lines.append("   QRIS: Tersedia")
+                    else:
+                        lines.append("   ⚠️ QRIS belum tersedia")
+
+            # Riwayat hanya milik pengguna Telegram yang sedang terhubung.
+            lines.extend(["", "🧾 RIWAYAT TOP UP TERAKHIR"])
+
+            requests = (
+                db.query(TopUpRequest)
+                .filter(TopUpRequest.user_id == user.id)
+                .order_by(TopUpRequest.created_at.desc())
+                .limit(10)
+                .all()
+            )
+
+            if not requests:
+                lines.append("Belum ada pengajuan Top Up.")
+            else:
+                status_labels = {
+                    "pending": "⏳ Menunggu verifikasi",
+                    "approved": "✅ Disetujui",
+                    "rejected": "❌ Ditolak",
+                }
+
+                def format_wit_date(value):
+                    if value is None:
+                        return "-"
+                    if value.tzinfo is None:
+                        value = value.replace(tzinfo=timezone.utc)
+                    return value.astimezone(
+                        WIT
+                    ).strftime("%d-%m-%Y %H:%M WIT")
+
+                for index, item in enumerate(requests, start=1):
+                    amount = (
+                        f"Rp{int(item.amount_idr):,}".replace(",", ".")
+                    )
+                    tokens = (
+                        f"{int(item.token_amount):,}".replace(",", ".")
+                    )
+                    status = status_labels.get(
+                        item.status, str(item.status)
+                    )
+
+                    lines.extend([
+                        "",
+                        f"{index}. {amount}",
+                        f"   Token: {tokens}",
+                        f"   Status: {status}",
+                        "   Diajukan: "
+                        + format_wit_date(item.created_at),
+                    ])
+
+                    if item.reviewed_at:
+                        lines.append(
+                            "   Diperiksa: "
+                            + format_wit_date(item.reviewed_at)
+                        )
+
+                    if item.admin_note:
+                        lines.append(
+                            "   Catatan Admin: "
+                            + item.admin_note[:300]
+                        )
+
+            lines.extend([
+                "",
+                "💳 Untuk mengajukan Top Up dan mengunggah "
+                "bukti pembayaran, gunakan halaman Top Up web app:",
+                "https://gamalama-mht.my.id/topup",
+                "",
+                "Bot Top Up resmi: @OmAIpay_Bot",
+                "",
+                "Token baru masuk setelah pembayaran disetujui Admin.",
+            ])
+
+        await _send_message(
+            chat_id,
+            "\n".join(lines),
+            reply_markup=_workspace_menu_markup(),
+        )
+        return {"ok": True, "workspace_section": "token_topup"}
+
+    if menu_choice == "👤 Profil & Bantuan":
+        update.user_id = user.id
+        update.status = "completed"
+        update.completed_at = _utc_now()
+        db.commit()
+
+        profile = build_user_info(db, user)
+
+        status_labels = {
+            "active": "Aktif",
+            "pending": "Menunggu persetujuan Admin",
+            "rejected": "Ditolak",
+        }
+        role_labels = {
+            "admin": "Administrator",
+            "user": "Pengguna",
+        }
+
+        joined_at = (
+            user.created_at.strftime("%d-%m-%Y")
+            if user.created_at else "-"
+        )
+
+        lines = [
+            "👤 PROFIL AKUN ONE MASTER AI",
+            "",
+            f"Nama: {profile.full_name or '-'}",
+            f"Email: {profile.email or '-'}",
+            f"Profesi: {profile.profession or '-'}",
+            f"Organisasi: {profile.organization or '-'}",
+            f"Status akun: {status_labels.get(profile.status, profile.status)}",
+            f"Peran: {role_labels.get(profile.role, profile.role)}",
+            f"Bergabung sejak: {joined_at}",
+            "",
+            "📦 INFORMASI PAKET",
+            f"Paket: {profile.package_name}",
+        ]
+
+        if profile.package_is_default:
+            lines.append("Jenis paket: Paket dasar (default)")
+        else:
+            lines.append("Jenis paket: Langganan aktif")
+
+        if profile.package_expires_at:
+            lines.append(
+                "Masa berlaku sampai: "
+                + profile.package_expires_at.replace("T", " ")
+            )
+
+        if profile.package_days_remaining is not None:
+            lines.append(
+                f"Sisa masa berlaku: {profile.package_days_remaining} hari"
+            )
+
+        if link.telegram_username:
+            lines.extend([
+                "",
+                "Telegram: @" + link.telegram_username.lstrip("@"),
+            ])
+
+        lines.extend([
+            "",
+            "━━━━━━━━━━━━━━━━━━",
+            "🆘 PUSAT BANTUAN OM.AI",
+            "",
+            "💬 CHAT AI",
+            "Pilih Chat AI, lalu kirim pertanyaan atau instruksi "
+            "seperti percakapan biasa.",
+            "",
+            "📚 RIWAYAT CHAT",
+            "Gunakan menu Riwayat Chat untuk melihat percakapan "
+            "yang pernah dilakukan.",
+            "",
+            "📁 FILE SAYA",
+            "Gunakan menu File Saya untuk mengelola berkas pribadi "
+            "Anda sesuai fitur yang tersedia.",
+            "",
+            "📄 BUAT DOKUMEN",
+            "Kirim instruksi pembuatan dokumen, misalnya laporan "
+            "dalam Word, proposal dalam PDF, tabel dalam Excel, "
+            "atau presentasi PowerPoint.",
+            "",
+            "🪙 TOKEN & TOP UP",
+            "Periksa saldo Top Up, batas harian, pemakaian, dan "
+            "paket melalui menu Token & Top Up.",
+            "Pengajuan Top Up dilakukan melalui:",
+            "https://gamalama-mht.my.id/topup",
+            "Bot pembayaran resmi: @OmAIpay_Bot",
+            "",
+            "🔐 KEAMANAN AKUN",
+            "Jangan membagikan kata sandi, kode pengaitan akun, "
+            "atau informasi akses kepada orang lain.",
+            "Data profil dan file yang ditampilkan di bot ini "
+            "mengikuti akun OM.AI yang tertaut.",
+            "",
+            "Jika mengalami kendala, simpan pesan kesalahan "
+            "dan sampaikan kepada Admin melalui kanal resmi OM.AI.",
+        ])
+
+        await _send_message(
+            chat_id,
+            "\n".join(lines),
+            reply_markup=_workspace_menu_markup(),
+        )
+        return {"ok": True, "workspace_section": "profile_help"}
+
     workspace_placeholders = {
         "📚 Riwayat Chat": "Riwayat Chat sedang disiapkan untuk integrasi Telegram.",
         "📁 File Saya": "Layanan File Saya sedang disiapkan untuk integrasi Telegram.",
@@ -1289,8 +2560,6 @@ async def central_telegram_webhook(
             "• Buatkan presentasi dalam PowerPoint\n\n"
             "Anda juga dapat menuliskan judul dengan format: Judul: Nama Dokumen"
         ),
-        "🪙 Token & Top Up": "Informasi Token & Top Up sedang disiapkan. Bot Top Up resmi tetap tersedia melalui @OmAIpay_Bot.",
-        "👤 Profil & Bantuan": "Menu Profil & Bantuan sedang disiapkan untuk integrasi Telegram.",
     }
 
     if menu_choice == "📁 File Saya":
@@ -1298,6 +2567,16 @@ async def central_telegram_webhook(
         update.status = "completed"
         update.completed_at = _utc_now()
         db.commit()
+        inline_del = _filesaya_delete_inline_markup(user.id)
+        if inline_del:
+            await _send_raw_telegram_method(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": list_user_files(user.id),
+                    "reply_markup": inline_del,
+                },
+            )
         await _send_message(
             chat_id,
             workspace_menu_text(),
@@ -1345,6 +2624,93 @@ async def central_telegram_webhook(
 
     db.commit()
 
+    # Jalur Direct Export: jika user hanya meminta ekspor jawaban terakhir ke file
+    # (tanpa instruksi ubah isi), render langsung tanpa memanggil LLM (0 token, instan).
+    if (
+        document_request is not None
+        and _is_pure_export_command(text.strip())
+        and link.conversation_id
+    ):
+        recent_assistant_msgs = (
+            db.query(Message)
+            .filter(
+                Message.conversation_id == link.conversation_id,
+                Message.role == "assistant",
+            )
+            .order_by(Message.created_at.desc())
+            .limit(10)
+            .all()
+        )
+        msg_ids = [m.id for m in recent_assistant_msgs]
+        doc_by_msg_id = {}
+        if msg_ids:
+            update_cls = type(update)
+            doc_updates = (
+                db.query(update_cls)
+                .filter(
+                    update_cls.assistant_message_id.in_(msg_ids),
+                    update_cls.document_content.isnot(None),
+                )
+                .order_by(update_cls.created_at.desc())
+                .all()
+            )
+            for u_doc in doc_updates:
+                if (u_doc.document_content or "").strip() and u_doc.assistant_message_id not in doc_by_msg_id:
+                    doc_by_msg_id[u_doc.assistant_message_id] = u_doc
+
+        source_body = None
+        source_title = None
+        for m in recent_assistant_msgs:
+            u_doc = doc_by_msg_id.get(m.id)
+            if u_doc is not None:
+                source_body = u_doc.document_content.strip()
+                source_title = (u_doc.document_title or "").strip() or None
+                break
+            content_clean = (m.content or "").strip()
+            if len(content_clean) >= 300:
+                source_body = content_clean
+                break
+
+        if source_body is not None:
+            try:
+                update.document_content = source_body
+                base_title = source_title or update.document_title
+                update.document_title = resolve_document_title(base_title, source_body, conversation_id=link.conversation_id, db=db, pure_export_checker=_is_pure_export_command, conv_model=globals().get("Conversation"))
+                create_user_document(
+                    db=db,
+                    user=user,
+                    title=update.document_title,
+                    body_text=source_body,
+                    file_format=update.document_format,
+                    file_id=update.generated_file_id,
+                )
+                update.document_delivery_status = "sending"
+                db.commit()
+
+                document_sent = await send_generated_document(
+                    chat_id=chat_id,
+                    user_id=user.id,
+                    file_id=update.generated_file_id,
+                    file_format=update.document_format,
+                    title=update.document_title,
+                )
+                if document_sent:
+                    update.document_delivery_status = "sent"
+                    update.response_sent_at = _utc_now()
+                    update.status = "completed"
+                    update.error_code = None
+                    update.completed_at = _utc_now()
+                    db.commit()
+                    return {"ok": True, "processed": True, "mode": "direct_export"}
+
+                print("[telegram] Direct Export gagal kirim dokumen, fallback ke _chat_impl.", flush=True)
+                update.document_delivery_status = "pending"
+                db.commit()
+            except Exception as exc:
+                print(f"[telegram] Direct Export error: {type(exc).__name__}: {exc}", flush=True)
+                update.document_delivery_status = "pending"
+                db.commit()
+
     try:
         # Memanggil alur chat yang sama dengan aplikasi web.
         # Tidak membuat sistem kuota atau settlement Telegram tersendiri.
@@ -1353,6 +2719,7 @@ async def central_telegram_webhook(
                 message=text.strip(),
                 model_id="default",
                 conversation_id=link.conversation_id,
+                file_id=_automatic_upload_context_file_id(user.id, text.strip()),
             ),
             current_user=user,
             db=db,

@@ -9,9 +9,11 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Index,
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -92,6 +94,16 @@ class TokenWallet(Base):
 
 class TokenTransaction(Base):
     __tablename__ = "token_transactions"
+
+    __table_args__ = (
+        Index(
+            "uq_token_transactions_reservation_type",
+            "reservation_id",
+            "transaction_type",
+            unique=True,
+            postgresql_where=text("reservation_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())

@@ -104,12 +104,12 @@ def extract_text(
             for table in doc.tables:
                 for row in table.rows:
                     parts.append(" | ".join(cell.text.strip() for cell in row.cells))
-            return "\\n".join(parts)
+            return "\n".join(parts)
 
         if ext == ".pdf":
             from pypdf import PdfReader
             reader = PdfReader(handle)
-            return "\\n\\n".join(
+            return "\n\n".join(
                 txt.strip()
                 for page in reader.pages
                 if (txt := (page.extract_text() or "")).strip()
@@ -126,7 +126,7 @@ def extract_text(
                         values = [str(value) if value is not None else "" for value in row]
                         if any(value.strip() for value in values):
                             parts.append(" | ".join(values))
-                return "\\n".join(parts)
+                return "\n".join(parts)
             finally:
                 workbook.close()
 
@@ -144,7 +144,7 @@ def extract_text(
                     if getattr(shape, "has_table", False):
                         for row in shape.table.rows:
                             parts.append(" | ".join(cell.text.strip() for cell in row.cells))
-            return "\\n".join(parts)
+            return "\n".join(parts)
 
     return ""
 

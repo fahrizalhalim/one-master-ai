@@ -18,7 +18,7 @@ GENERAL_SKILL_FALLBACK = "general"
 client = OpenAI(
     api_key=OPENAI_API_KEY or "not-set",
     base_url=OPENAI_BASE_URL,
-    timeout=150.0,
+    timeout=240.0,
     max_retries=0,
 )
 
@@ -65,6 +65,7 @@ def _ask_groq(
             max_completion_tokens=output_limit,
         )
     except Exception as exc:
+        print(f"[master_agent] responses.create error: {type(exc).__name__}: {exc}", flush=True)
         status_code = getattr(exc, "status_code", None)
         raise ProviderCallError(
             "Provider Groq gagal memproses permintaan.",
@@ -231,9 +232,64 @@ def _ask_legacy(
     prompt: str,
     provider_route: str = "manual",
     max_output_tokens: int = 4096,
+    image_data_url: str | None = None,
 ) -> dict:
     """Panggil Ai.sumopod dengan batas output dari reservasi."""
-    output_limit = max(1, min(int(max_output_tokens), 4096))
+    import os
+    output_limit = max(16384, min(int(max_output_tokens), 16384))
+
+    if image_data_url:
+        vision_model = os.getenv("OPENAI_VISION_MODEL", "gpt-4o").strip() or "gpt-4o"
+        try:
+            response = client.chat.completions.create(
+                model=vision_model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                        ],
+                    }
+                ],
+                max_tokens=min(output_limit, 4096),
+            )
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None)
+            raise ProviderCallError(
+                "Provider vision gagal menganalisis gambar.",
+                safe_to_refund=_provider_error_is_definitive(exc),
+                reason=f"vision_error_{status_code or 'unknown'}",
+            ) from exc
+
+        usage = _validated_usage(
+            getattr(response, "usage", None),
+            "prompt_tokens",
+            "completion_tokens",
+        )
+        answer = _extract_answer(response, "chat_completions")
+        if not answer:
+            raise ProviderCallError(
+                "Model vision tidak memberikan hasil analisis gambar.",
+                safe_to_refund=False,
+                reason="vision_empty_answer",
+            )
+        if usage is None:
+            raise ProviderCallError(
+                "Data usage analisis gambar tidak valid.",
+                safe_to_refund=False,
+                reason="vision_usage_invalid",
+                answer=answer,
+            )
+        pt, ct = usage
+        return {
+            "text": answer,
+            "prompt_tokens": pt,
+            "completion_tokens": ct,
+            "provider": "aisumopod",
+            "model": vision_model,
+            "provider_route": "vision",
+        }
 
     try:
         response = client.responses.create(
@@ -292,6 +348,23 @@ def _ask_legacy(
 
     answer = _extract_answer(response, api_type)
 
+    if answer is None and api_type == "responses":
+        try:
+            response = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=output_limit,
+            )
+            api_type = "chat_completions"
+            usage = _validated_usage(
+                getattr(response, "usage", None),
+                "prompt_tokens",
+                "completion_tokens",
+            )
+            answer = _extract_answer(response, api_type)
+        except Exception:
+            pass
+
     if answer is None:
         raise ProviderCallError(
             "Ai.sumopod memberikan respons tanpa jawaban yang dapat dibaca.",
@@ -323,18 +396,18 @@ def ask_ai(
     prompt: str,
     model_id: str = "default",
     max_output_tokens: int = 4096,
+    image_data_url: str | None = None,
 ) -> dict:
     """Gunakan provider dengan batas output sesuai reservasi."""
     output_limit = max(1, min(int(max_output_tokens), 4096))
 
     # OM.AI Pro menggunakan provider SumoPod.
-    if model_id == "default":
-        if output_limit == 4096:
-            return _ask_legacy(prompt, provider_route="manual")
+    if model_id == "default" or image_data_url:
         return _ask_legacy(
             prompt,
             provider_route="manual",
             max_output_tokens=output_limit,
+            image_data_url=image_data_url,
         )
 
     try:
@@ -423,6 +496,7 @@ def prepare_master_prompt(
 - Susun dokumen secara profesional dengan judul, subjudul, paragraf,
   dan penomoran yang konsisten sesuai kebutuhan.
 - Sesuaikan struktur dengan jenis dokumen yang diminta.
+- Jika membuat presentasi/slide (PPTX/PPT), susun per slide dengan format `## Slide 1: Judul Slide`, poin ringkas (maksimal 5 poin per slide), dan sertakan tepat 1 baris `Visual: [2-4 kata kunci gambar dalam bahasa Inggris yang relevan dengan isi slide]` pada setiap slide.
 - Jangan memasukkan catatan internal, komentar proses, atau instruksi
   kepada pengguna yang tidak termasuk isi dokumen.
 - Gunakan format penanda berikut secara persis dan jangan menambahkan
@@ -553,6 +627,7 @@ def master_agent(
     model_id: str = "default",
     document_mode: bool = False,
     max_output_tokens: int = 4096,
+    image_data_url: str | None = None,
 ) -> dict:
     """Jalankan Master Agent dengan batas output reservasi."""
     prepared = prepared or prepare_master_prompt(
@@ -570,14 +645,12 @@ def master_agent(
         max_output_tokens = 12000
 
     skill = prepared["skill"]
-    if max_output_tokens >= 4096:
-        result = ask_ai(prepared["prompt"], model_id=model_id)
-    else:
-        result = ask_ai(
-            prepared["prompt"],
-            model_id=model_id,
-            max_output_tokens=max_output_tokens,
-        )
+    result = ask_ai(
+        prepared["prompt"],
+        model_id=model_id,
+        max_output_tokens=min(max_output_tokens, 4096),
+        image_data_url=image_data_url,
+    )
 
     answer = result["text"]
     document_content = None

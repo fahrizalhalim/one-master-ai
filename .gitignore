@@ -26,3 +26,27 @@ backend/storage/*
 !backend/storage/.gitkeep
 backend/storage/uploads/*
 backend/storage/uploads/*
+
+# Local environment backups and secrets
+.env.*
+!.env.example
+
+# Local backups (preserve on server, never commit)
+backups/
+
+# Local test databases and virtual environments
+*.db
+*.sqlite
+*.sqlite3
+backend/.venv-test/
+
+# Accidental empty shell artifacts
+/0
+/10
+/APIConnectionError
+/APIError
+/APIStatusError
+/next
+/frontend/next
+/frontend/frontend@0.1.0
+/frontend@0.1.0

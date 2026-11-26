@@ -33,4 +33,9 @@ def get_current_user(
     if user is None or not user.is_active:
         raise credentials_error
 
+    # Token lama tanpa klaim sv dianggap memiliki versi awal 0.
+    token_version = payload.get("sv", 0)
+    if not isinstance(token_version, int) or token_version != user.token_version:
+        raise credentials_error
+
     return user

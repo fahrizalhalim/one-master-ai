@@ -155,7 +155,7 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
 
     # Token tetap diterbitkan agar user bisa cek status via /auth/me,
     # TAPI chat diblokir selama status != active.
-    token = create_access_token({"sub": user.id})
+    token = create_access_token({"sub": user.id, "sv": user.token_version})
     return TokenResponse(access_token=token, user=build_user_info(db, user))
 
 
@@ -189,8 +189,21 @@ def login(
             detail="Akun dinonaktifkan.",
         )
 
-    token = create_access_token({"sub": user.id})
+    token = create_access_token({"sub": user.id, "sv": user.token_version})
     return TokenResponse(access_token=token, user=build_user_info(db, user))
+
+
+@router.post("/logout-all", response_model=MessageResponse)
+def logout_all(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Cabut seluruh sesi web dengan menaikkan versi token akun."""
+    current_user.token_version += 1
+    db.commit()
+    return MessageResponse(
+        message="Semua sesi akun berhasil dikeluarkan. Silakan login kembali."
+    )
 
 
 @router.get("/me", response_model=UserInfo)

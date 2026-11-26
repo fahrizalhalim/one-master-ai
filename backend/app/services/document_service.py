@@ -13,14 +13,22 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Pt, Inches as DocxInches
 from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from pptx import Presentation
-from pptx.util import Inches, Pt as PPTPt
+from pptx.dml.color import RGBColor
+from pptx.util import Inches as PPTInches, Pt as PPTPt
 from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    Paragraph, SimpleDocTemplate, Spacer, HRFlowable,
+    ListFlowable, ListItem, KeepTogether,
+)
 from PIL import Image, ImageDraw, ImageFont
 
 
@@ -38,29 +46,104 @@ LEGACY_FORMATS = {"doc", "xls", "ppt"}
 NATIVE_FORMAT = {"doc": "docx", "xls": "xlsx", "ppt": "pptx"}
 
 
+
 def parse_blocks(text: str):
-    """Ubah markdown sederhana menjadi blok teks."""
+    """Parse Markdown sederhana dengan pengenalan heading bernomor."""
     blocks = []
+    section_names = (
+        "pendahuluan", "latar belakang", "rumusan masalah",
+        "tujuan", "manfaat", "tinjauan pustaka", "landasan teori",
+        "metode", "metodologi", "hasil", "pembahasan",
+        "kesimpulan", "saran", "daftar pustaka", "referensi",
+        "lampiran", "penutup", "abstrak",
+    )
+
     for raw in str(text or "").splitlines():
         line = raw.strip()
         if not line:
             continue
-        clean = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
-        clean = re.sub(r"`(.+?)`", r"\1", clean)
 
-        if clean.startswith("# "):
-            blocks.append(("title", clean[2:].strip()))
-        elif clean.startswith("## "):
-            blocks.append(("h2", clean[3:].strip()))
-        elif clean.startswith("### "):
-            blocks.append(("h3", clean[4:].strip()))
-        elif re.match(r"^[-*]\s+", clean):
-            blocks.append(("bullet", re.sub(r"^[-*]\s+", "", clean)))
-        elif re.match(r"^\d+[.)]\s+", clean):
-            blocks.append(("number", re.sub(r"^\d+[.)]\s+", "", clean)))
+        if re.fullmatch(r"[-*_]{3,}", line):
+            blocks.append(("rule", ""))
+            continue
+
+        heading = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if heading:
+            level = len(heading.group(1))
+            kind = "title" if level == 1 else (
+                "h2" if level == 2 else "h3"
+            )
+            blocks.append((kind, heading.group(2).strip()))
+            continue
+
+        # Heading bernomor: 1. Pendahuluan, 2.1 Perkembangan, dst.
+        numbered_heading = re.match(
+            r"^(\d+(?:\.\d+)*)(?:[.)])?\s+(.+)$", line
+        )
+        if numbered_heading:
+            number = numbered_heading.group(1)
+            label = numbered_heading.group(2).strip()
+            normalized = label.lower().rstrip(":.")
+
+            if (
+                "." in number
+                or any(
+                    normalized == name or normalized.startswith(name + " ")
+                    for name in section_names
+                )
+            ):
+                depth = number.count(".")
+                kind = "h2" if depth == 0 else "h3"
+                blocks.append((kind, f"{number}. {label}"))
+                continue
+
+        if re.match(r"^[-*+]\s+", line):
+            blocks.append(("bullet", re.sub(r"^[-*+]\s+", "", line)))
+        elif re.match(r"^\d+[.)]\s+", line):
+            blocks.append(("number", re.sub(r"^\d+[.)]\s+", "", line)))
         else:
-            blocks.append(("para", clean))
+            blocks.append(("para", line))
+
     return blocks
+
+
+def _reportlab_markup(text: str) -> str:
+    """Konversi inline Markdown menjadi markup ReportLab yang aman."""
+    value = escape(str(text or ""))
+    value = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", value)
+    value = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<i>\1</i>", value)
+    value = re.sub(
+        r"`([^`]+)`",
+        r'<font name="OMAI-Mono">\1</font>',
+        value,
+    )
+    return value
+
+
+def _add_docx_runs(paragraph, text: str) -> None:
+    """Tambahkan teks dan inline Markdown ke paragraf DOCX."""
+    pattern = re.compile(r"(\*\*.+?\*\*|\*[^*]+\*|`[^`]+`)")
+    position = 0
+
+    for match in pattern.finditer(str(text or "")):
+        if match.start() > position:
+            paragraph.add_run(text[position:match.start()])
+
+        token = match.group(0)
+        if token.startswith("**"):
+            run = paragraph.add_run(token[2:-2])
+            run.bold = True
+        elif token.startswith("`"):
+            run = paragraph.add_run(token[1:-1])
+            run.font.name = "Consolas"
+        else:
+            run = paragraph.add_run(token[1:-1])
+            run.italic = True
+
+        position = match.end()
+
+    if position < len(text):
+        paragraph.add_run(text[position:])
 
 
 def _safe_filename(title: str) -> str:
@@ -99,76 +182,16 @@ def _user_storage_dir(user_id: str) -> Path:
     return resolved
 
 
+
 def _build_docx(title: str, body_text: str, path: Path) -> None:
-    doc = Document()
-    doc.add_heading(title, level=0)
+    from .print_layout_service import build_docx_print_ready
+    build_docx_print_ready(title, body_text, path)
 
-    meta = doc.add_paragraph()
-    run = meta.add_run(
-        f"Dihasilkan oleh ONE MASTER AI — {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-    )
-    run.font.size = Pt(9)
-    run.font.italic = True
-
-    for kind, content in parse_blocks(body_text):
-        if kind == "title":
-            doc.add_heading(content, level=1)
-        elif kind == "h2":
-            doc.add_heading(content, level=2)
-        elif kind == "h3":
-            doc.add_heading(content, level=3)
-        elif kind == "bullet":
-            doc.add_paragraph(content, style="List Bullet")
-        elif kind == "number":
-            doc.add_paragraph(content, style="List Number")
-        else:
-            doc.add_paragraph(content)
-
-    doc.save(str(path))
 
 
 def _build_pdf(title: str, body_text: str, path: Path) -> None:
-    styles = {
-        "doc_title": ParagraphStyle("doc_title", fontSize=18, leading=22, spaceAfter=12),
-        "title": ParagraphStyle("title", fontSize=14, leading=18, spaceBefore=10, spaceAfter=6),
-        "h2": ParagraphStyle("h2", fontSize=12, leading=16, spaceBefore=8, spaceAfter=4),
-        "h3": ParagraphStyle("h3", fontSize=11, leading=14, spaceBefore=6, spaceAfter=3),
-        "para": ParagraphStyle("para", fontSize=10, leading=14, spaceAfter=6),
-        "bullet": ParagraphStyle("bullet", fontSize=10, leading=14, leftIndent=14, spaceAfter=3),
-        "number": ParagraphStyle("number", fontSize=10, leading=14, leftIndent=14, spaceAfter=3),
-        "meta": ParagraphStyle("meta", fontSize=8, leading=10, textColor="#666666", spaceAfter=10),
-    }
-
-    doc = SimpleDocTemplate(
-        str(path), pagesize=A4,
-        leftMargin=2 * cm, rightMargin=2 * cm,
-        topMargin=2 * cm, bottomMargin=2 * cm,
-    )
-    story = [
-        Paragraph(escape(title), styles["doc_title"]),
-        Paragraph(
-            escape(f"Dihasilkan oleh ONE MASTER AI — {datetime.now():%d/%m/%Y %H:%M}"),
-            styles["meta"],
-        ),
-    ]
-
-    counter = 0
-    for kind, content in parse_blocks(body_text):
-        safe = escape(content)
-        if kind == "number":
-            counter += 1
-            story.append(Paragraph(f"{counter}. {safe}", styles["number"]))
-        else:
-            counter = 0
-            if kind in {"title", "h2", "h3"}:
-                story.append(Paragraph(safe, styles[kind]))
-            elif kind == "bullet":
-                story.append(Paragraph(f"&#8226; {safe}", styles["bullet"]))
-            else:
-                story.append(Paragraph(safe, styles["para"]))
-                story.append(Spacer(1, 2))
-
-    doc.build(story)
+    from .print_layout_service import build_pdf_print_ready
+    build_pdf_print_ready(title, body_text, path)
 
 
 def _build_txt(title: str, body_text: str, path: Path, markdown: bool = False) -> None:
@@ -178,52 +201,15 @@ def _build_txt(title: str, body_text: str, path: Path, markdown: bool = False) -
     path.write_text(content.rstrip() + "\n", encoding="utf-8")
 
 
+
 def _build_xlsx(title: str, body_text: str, path: Path) -> None:
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Hasil AI"
-    sheet.append([title])
-    sheet.append(["Dihasilkan oleh ONE MASTER AI"])
-    sheet.append([""])
-    sheet.append(["Jenis", "Isi"])
-
-    for kind, content in parse_blocks(body_text):
-        sheet.append([kind, content])
-
-    sheet.column_dimensions["A"].width = 18
-    sheet.column_dimensions["B"].width = 100
-    sheet.freeze_panes = "A5"
-    workbook.save(path)
+    from .print_layout_service import build_xlsx_print_ready
+    build_xlsx_print_ready(title, body_text, path)
 
 
 def _build_pptx(title: str, body_text: str, path: Path) -> None:
-    presentation = Presentation()
-    layout = presentation.slide_layouts[1]
-
-    slide = presentation.slides.add_slide(layout)
-    slide.shapes.title.text = title
-    slide.placeholders[1].text = (
-        f"Dihasilkan oleh ONE MASTER AI\n{datetime.now():%d/%m/%Y %H:%M}"
-    )
-
-    blocks = parse_blocks(body_text)
-    chunks = [blocks[i:i + 7] for i in range(0, len(blocks), 7)] or [[]]
-
-    for index, chunk in enumerate(chunks, start=1):
-        slide = presentation.slides.add_slide(layout)
-        slide.shapes.title.text = f"{title} — Bagian {index}"
-        frame = slide.placeholders[1].text_frame
-        frame.clear()
-
-        for block_index, (kind, content) in enumerate(chunk):
-            paragraph = frame.paragraphs[0] if block_index == 0 else frame.add_paragraph()
-            prefix = "• " if kind == "bullet" else ""
-            paragraph.text = prefix + content
-            paragraph.level = 0
-            paragraph.font.size = PPTPt(18 if kind in {"title", "h2"} else 14)
-
-    presentation.save(path)
-
+    from .pptx_layout_service import build_pptx_print_ready
+    build_pptx_print_ready(title, body_text, path)
 
 def _build_image(title: str, body_text: str, path: Path, image_format: str) -> None:
     """Render jawaban sebagai gambar teks; bukan ilustrasi generatif."""
