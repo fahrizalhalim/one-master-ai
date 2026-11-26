@@ -2063,6 +2063,69 @@ async def central_telegram_webhook(
                             if review_pdf_sent
                             else "📄 Review lengkap tersimpan di File Saya."
                         )
+                        # Lanjutan otomatis: 10 pertanyaan penguji (PDF) yang
+                        # disusun dari hasil review — murah karena tanpa
+                        # membaca ulang seluruh naskah.
+                        try:
+                            ringkas = review_result.document_content[:15000]
+                            tanya_message = (
+                                "Dari hasil review berikut, buat '10 Pertanyaan "
+                                "Penguji' untuk mahasiswa. Format tiap nomor: "
+                                "pertanyaan + arah jawaban singkat + amunisi "
+                                "(bagian/angka naskah yang dirujuk). Tutup dengan "
+                                "daftar angka penting yang wajib dihafal. "
+                                "Isi harus spesifik pada naskah (metode, metrik "
+                                "pengujian, alasan pemilihan teknologi, keamanan/"
+                                "etika, kondisi gagal).\n\n=== HASIL REVIEW ===\n"
+                                f"{ringkas}"
+                            )
+                            tanya_result = _chat_impl(
+                                ChatRequest(
+                                    message=tanya_message,
+                                    model_id="default",
+                                    conversation_id=link.conversation_id,
+                                ),
+                                current_user=user,
+                                db=db,
+                                reservation_reference=(
+                                    f"telegram-central:auto-tanya:{update_id}"
+                                ),
+                                document_mode=True,
+                            )
+                            link.conversation_id = tanya_result.conversation_id
+                            db.commit()
+                            if tanya_result.document_content:
+                                tanya_file_id = hashlib.sha256(
+                                    f"{user.id}:auto-tanya:{update.update_id}".encode(
+                                        "utf-8"
+                                    )
+                                ).hexdigest()[:12]
+                                create_user_document(
+                                    db=db,
+                                    user=user,
+                                    title=f"10 Pertanyaan Penguji {file_name}",
+                                    body_text=tanya_result.document_content,
+                                    file_format="pdf",
+                                    file_id=tanya_file_id,
+                                )
+                                tanya_sent = await send_generated_document(
+                                    chat_id=chat_id,
+                                    user_id=user.id,
+                                    file_id=tanya_file_id,
+                                    file_format="pdf",
+                                    title=f"10 Pertanyaan Penguji {file_name}",
+                                )
+                                review_note += (
+                                    " 🎤 10 Pertanyaan Penguji terlampir (PDF)."
+                                    if tanya_sent
+                                    else " 🎤 10 Pertanyaan Penguji tersimpan di File Saya."
+                                )
+                        except Exception as exc:
+                            print(
+                                f"[telegram] Auto-tanya penguji gagal: "
+                                f"{type(exc).__name__}: {exc}",
+                                flush=True,
+                            )
                 except Exception as exc:
                     print(
                         f"[telegram] Auto-review gagal: "
