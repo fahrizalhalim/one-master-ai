@@ -1,0 +1,31 @@
+.env
+.env.*
+!.env.example
+
+.git/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+tests/
+test_*.db
+*.sqlite
+*.sqlite3
+storage/
+backups/
+
+# Local test environment and databases
+.venv-test/
+*.db
+
+# Exclude local source snapshots from production image
+**/*.before-*
+**/*.pre-*
+**/*.bak
+**/*.audit-bak
+**/*.disabled
