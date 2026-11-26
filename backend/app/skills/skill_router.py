@@ -71,6 +71,8 @@ SKILLS = {
         "ai scientist", "agentic scientist", "paper otomatis", "paper ilmiah otomatis",
         "eksperimen otomatis", "riset otomatis", "autonomous research", "kode eksperimen",
         "hipotesis otomatis", "draft paper ai", "sakana ai scientist",
+        "pentest", "audit keamanan", "uji keamanan", "keamanan website",
+        "vulnerability", "hardening", "owasp", "scanning keamanan", "cek keamanan situs",
         "humanisasi", "humanize", "tulisan natural", "menyunting tulisan",
         "kesan ai", "bau ai", "terdengar natural", "seperti manusia",
         "suara penulis", "gaya penulis",
