@@ -173,6 +173,15 @@ def _automatic_upload_context_file_id(user_id: str, message: str) -> str | None:
     return None
 
 
+def _is_reviewable_naskah(filename: str) -> bool:
+    """True bila nama file terindikasi proposal/skripsi TI (pemicu auto-review)."""
+    n = (filename or "").lower()
+    return any(
+        kw in n
+        for kw in ("proposal", "skripsi", "tugas akhir", "tugas_akhir", "naskah")
+    )
+
+
 def _detect_document_request(message: str) -> tuple[str, str] | None:
     """Deteksi permintaan pembuatan dokumen dan format output."""
     value = str(message or "").strip()
@@ -1988,8 +1997,87 @@ async def central_telegram_webhook(
             update.error_code = None
             update.completed_at = _utc_now()
             db.commit()
+
+            # Auto-review: file bernama proposal/skripsi/naskah langsung
+            # direview lengkap (Template Skripsi Informatika UMMU 2026)
+            # dan hasilnya dikirim sebagai PDF melalui generator dokumen.
+            file_name = str(document.get("file_name") or "")
+            review_note = ""
+            if _is_reviewable_naskah(file_name):
+                try:
+                    review_message = (
+                        f"Lakukan review lengkap file '{file_name}' menggunakan "
+                        "Template Skripsi Informatika UMMU 2026: (1) struktur & "
+                        "kesesuaian template, (2) ejaan judul halaman sampul kata "
+                        "per kata, (3) keselarasan rumusan-tujuan-kesimpulan, "
+                        "(4) kajian terdahulu min. 5 dengan tahun, (5) sitasi vs "
+                        "daftar pustaka APA, (6) novelty/gap, (7) validitas "
+                        "pengujian, (8) pra-integritas: duplikasi internal, "
+                        "indikasi gaya AI, kredensial, (9) checklist perbaikan "
+                        "bernomor, (10) poin yang sudah bagus. Akhiri dengan "
+                        "keputusan kelayakan."
+                    )
+                    review_result = _chat_impl(
+                        ChatRequest(
+                            message=review_message,
+                            model_id="default",
+                            conversation_id=link.conversation_id,
+                            file_id=_automatic_upload_context_file_id(
+                                user.id, review_message
+                            ),
+                        ),
+                        current_user=user,
+                        db=db,
+                        reservation_reference=(
+                            f"telegram-central:auto-review:{update_id}"
+                        ),
+                        document_mode=True,
+                    )
+                    link.conversation_id = review_result.conversation_id
+                    db.commit()
+                    review_reply = review_result.answer
+                    if review_result.document_content:
+                        review_file_id = hashlib.sha256(
+                            f"{user.id}:auto-review:{update.update_id}".encode(
+                                "utf-8"
+                            )
+                        ).hexdigest()[:12]
+                        create_user_document(
+                            db=db,
+                            user=user,
+                            title=f"Review {file_name}",
+                            body_text=review_result.document_content,
+                            file_format="pdf",
+                            file_id=review_file_id,
+                        )
+                        update.generated_file_id = review_file_id
+                        review_pdf_sent = await send_generated_document(
+                            chat_id=chat_id,
+                            user_id=user.id,
+                            file_id=review_file_id,
+                            file_format="pdf",
+                            title=f"Review {file_name}",
+                        )
+                        review_note = (
+                            "📄 Review lengkap terlampir dalam PDF."
+                            if review_pdf_sent
+                            else "📄 Review lengkap tersimpan di File Saya."
+                        )
+                except Exception as exc:
+                    print(
+                        f"[telegram] Auto-review gagal: "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    review_note = (
+                        "⚠️ Review otomatis gagal dijalankan (periksa kuota "
+                        "token). Naskah tetap tersimpan di File Saya."
+                    )
+                db.commit()
+
+            full_reply = reply if not review_note else f"{reply}\n\n{review_note}"
             await _send_message(
-                chat_id, reply, reply_markup=_workspace_menu_markup()
+                chat_id, full_reply, reply_markup=_workspace_menu_markup()
             )
             return {"ok": True, "file_uploaded": True}
         except WorkspaceError as exc:
