@@ -11,6 +11,8 @@ SKILLS = {
         "rps", "obe", "skripsi", "makalah", "jurnal", "perkuliahan",
         "penelitian", "kuliah", "mahasiswa", "kurikulum", "cpl", "cpmk",
         "dosen", "kampus", "universitas", "asesmen", "ujian", "tugas akhir",
+        "ppt", "powerpoint", "slide", "presentasi", "narasi bicara",
+        "abstrak inggris", "proofreading", "bahasa inggris akademik",
         "tutor", "belajar", "flashcard", "latihan soal", "soal", "koreksi",
         "skripsi", "tugas akhir", "proposal skripsi", "sidang", "penguji",
         "makalah", "essay", "esai", "resume materi", "ringkasan jurnal",
