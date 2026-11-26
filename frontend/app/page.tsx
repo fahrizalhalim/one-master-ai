@@ -6,10 +6,11 @@ import { useAuth } from "@/app/auth-context";
 import UploadButton, { type AttachedFile } from "@/app/upload-button";
 import { useConversations } from "@/app/use-conversations";
 import TelegramIcon from "@/app/telegram-icon";
+import { ChatActionButtons, SLASH_SUGGESTIONS, type ChatAction } from "@/app/chat-telegram-actions";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
-type Message = { role: "user" | "assistant"; content: string; skill?: string };
+type Message = { role: "user" | "assistant"; content: string; skill?: string; actions?: ChatAction[] };
 
 const PACKAGE_DISPLAY: Record<string, { icon: string; name: string }> = {
   starter: { icon: "🎓", name: "Starter" },
@@ -341,8 +342,8 @@ export default function Home() {
     setMessages([]);
   }
 
-  async function send() {
-    const text = input.trim();
+  async function send(overrideText?: string) {
+    const text = (typeof overrideText === "string" ? overrideText : input).trim();
     if ((!text && !attached) || busy || !token) return;
 
     const displayText = attached
@@ -372,8 +373,9 @@ export default function Home() {
       if (!res.ok) throw new Error(data.detail || "Gagal memproses");
       setMessages((m) => [
         ...m,
-        { role: "assistant", content: data.answer, skill: data.skill },
+        { role: "assistant", content: data.answer, skill: data.skill, actions: data.actions },
       ]);
+      window.dispatchEvent(new Event("oma-storage-updated"));
       // Percakapan baru mungkin saja terbuat — refresh sidebar
       refresh();
       loadQuota();
@@ -521,11 +523,19 @@ export default function Home() {
                       </span>
                     </div>
                     <div className="mt-2 flex justify-between gap-2 border-t border-gray-800 pt-2 text-xs">
-                      <span className="text-gray-400">Saldo Top Up</span>
-                      <span className="text-gray-200">
-                        {(quota.topup_balance ?? 0).toLocaleString("id-ID")} token
+                      <span className="text-gray-400">
+                        {(quota.topup_balance ?? 0) < 0 ? "Utang Top Up" : "Saldo Top Up"}
+                      </span>
+                      <span className={(quota.topup_balance ?? 0) < 0 ? "font-semibold text-red-400" : "text-gray-200"}>
+                        {Math.abs(quota.topup_balance ?? 0).toLocaleString("id-ID")} token
+                        {(quota.topup_balance ?? 0) < 0 ? " (belum lunas)" : ""}
                       </span>
                     </div>
+                    {(quota.topup_balance ?? 0) < 0 && (
+                      <p className="mt-1 text-xs text-red-400">
+                        Akses AI diblokir sampai utang dilunasi melalui Top Up atau kredit Admin.
+                      </p>
+                    )}
                   </>
                 )}
               </div>
@@ -534,6 +544,11 @@ export default function Home() {
             <StoragePanel token={token} />
 
             <div className="flex flex-col gap-2">
+              {user.role === "admin" && (
+                <a href="/automation" className="rounded-lg border border-gray-800 px-3 py-2 text-center text-sm text-gray-300 transition hover:bg-gray-800">
+                  ⚙️ Automation
+                </a>
+              )}
               <a href="/telegram" className="flex items-center justify-center gap-2 rounded-lg border border-gray-800 px-3 py-2 text-sm text-gray-300 transition hover:bg-gray-800">
                 <TelegramIcon size={18} />
                 Integrasi Telegram
@@ -637,7 +652,16 @@ export default function Home() {
                     : "bg-gray-800 text-gray-100"
                 }`}
               >
-                <p>{m.content}</p>
+                <p className="whitespace-pre-wrap">{m.content}</p>
+                {m.role === "assistant" && m.actions && m.actions.length > 0 && (
+                  <ChatActionButtons
+                    token={token}
+                    apiUrl={API_URL}
+                    actions={m.actions}
+                    onRunCommand={(cmd) => void send(cmd)}
+                    onAppendMessage={(txt, sk) => setMessages((prev) => [...prev, { role: "assistant", content: txt, skill: sk }])}
+                  />
+                )}
 
                 {m.role === "assistant" && m.content.startsWith("❤️") && (
                   <div className="mt-4 rounded-xl border border-amber-700/50 bg-gray-900 p-3">
@@ -686,7 +710,25 @@ export default function Home() {
         </div>
 
         {/* Input */}
-        <div className="shrink-0 border-t border-gray-800 px-3 py-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] sm:px-6 sm:py-4">
+        <div className="relative shrink-0 border-t border-gray-800 px-3 py-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] sm:px-6 sm:py-4">
+          {input.startsWith("/") && !input.includes(" ") && (
+            <div className="mb-2 max-h-48 overflow-y-auto rounded-xl border border-gray-700 bg-gray-900 p-1.5 shadow-lg">
+              {SLASH_SUGGESTIONS.filter((x) => x.cmd.startsWith(input.toLowerCase())).map((item) => (
+                <button
+                  key={item.cmd}
+                  type="button"
+                  onClick={() => {
+                    if (item.cmd.endsWith(" ")) { setInput(item.cmd); chatInputRef.current?.focus(); }
+                    else { void send(item.cmd); }
+                  }}
+                  className="flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-xs hover:bg-gray-800"
+                >
+                  <span className="font-mono font-semibold text-blue-300">{item.cmd.trim()}</span>
+                  <span className="text-gray-400">{item.desc}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <input
             ref={chatInputRef}
             onFocus={closeSidebar}
@@ -726,7 +768,7 @@ export default function Home() {
             <div className="flex-1" />
 
             <button
-              onClick={send}
+              onClick={() => void send()}
               disabled={busy || (!input.trim() && !attached)}
               className={`h-[42px] shrink-0 rounded-xl border px-4 py-0 text-sm font-medium transition disabled:opacity-40 sm:px-6 sm:text-base ${
                 input.trim() || attached

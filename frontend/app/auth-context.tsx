@@ -31,7 +31,7 @@ type AuthState = {
     profession: string;
     organization: string;
   }) => Promise<string | null>;
-  logout: () => void;
+  logout: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -41,24 +41,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Pulihkan sesi lalu sinkronkan profil dan paket terbaru dari backend.
+  // Pulihkan token dan profil yang tersimpan saat aplikasi dibuka.
   useEffect(() => {
-    const t = localStorage.getItem("oma_token");
-    const u = localStorage.getItem("oma_user");
+    const storedToken = localStorage.getItem("oma_token");
+    const storedUser = localStorage.getItem("oma_user");
 
-    if (!t) {
+    if (!storedToken) {
       setLoading(false);
       return;
     }
 
-    setToken(t);
+    setToken(storedToken);
 
-    if (u) {
+    if (storedUser) {
       try {
-        setUser(JSON.parse(u));
+        setUser(JSON.parse(storedUser));
       } catch {
         localStorage.removeItem("oma_user");
       }
+    }
+  }, []);
+
+  // Periksa sesi aktif dan deteksi pencabutan dari perangkat lain.
+  // Efek ini ikut berjalan setiap kali token berubah setelah login.
+  useEffect(() => {
+    if (!token) {
+      setLoading(false);
+      return;
     }
 
     let cancelled = false;
@@ -66,29 +75,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     async function refreshProfile() {
       try {
         const res = await fetch(`${API_URL}/api/v1/auth/me`, {
-          headers: { Authorization: `Bearer ${t}` },
+          headers: { Authorization: `Bearer ${token}` },
         });
+
+        if (cancelled) return;
 
         if (res.ok) {
           const freshUser = await res.json();
-          if (!cancelled) {
+
+          if (!cancelled && localStorage.getItem("oma_token") === token) {
             setUser(freshUser);
             localStorage.setItem("oma_user", JSON.stringify(freshUser));
           }
+        } else if (
+          res.status === 401 &&
+          localStorage.getItem("oma_token") === token
+        ) {
+          // Sesi ini dicabut dari perangkat lain.
+          setToken(null);
+          setUser(null);
+          localStorage.removeItem("oma_token");
+          localStorage.removeItem("oma_user");
         }
       } catch {
-        // Pertahankan sesi lokal jika backend sementara tidak terjangkau.
+        // Pertahankan sesi jika backend sementara tidak terjangkau.
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
 
     refreshProfile();
+    const sessionCheck = window.setInterval(refreshProfile, 30000);
 
     return () => {
       cancelled = true;
+      window.clearInterval(sessionCheck);
     };
-  }, []);
+  }, [token]);
 
   // Sinkronkan perubahan login/logout dari tab browser lain.
   useEffect(() => {
@@ -175,12 +198,47 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [persist]
   );
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
+    const confirmed = window.confirm(
+      "Apakah Anda yakin ingin keluar?\n\n" +
+      "Tindakan ini akan mengeluarkan akun Anda dari semua perangkat dan sesi web yang sedang aktif."
+    );
+    if (!confirmed) return;
+
+    const currentToken = localStorage.getItem("oma_token") || token;
+
+    if (currentToken) {
+      try {
+        const res = await fetch(`${API_URL}/api/v1/auth/logout-all`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${currentToken}` },
+        });
+
+        if (!res.ok) {
+          let detail = "Tidak dapat mengeluarkan semua sesi. Silakan coba lagi.";
+          try {
+            const data = await res.json();
+            if (typeof data.detail === "string") detail = data.detail;
+          } catch {
+            // Gunakan pesan default.
+          }
+          window.alert(detail);
+          return;
+        }
+      } catch {
+        window.alert(
+          "Koneksi ke server gagal. Sesi belum dipastikan dicabut. Periksa koneksi lalu coba lagi."
+        );
+        return;
+      }
+    }
+
     setToken(null);
     setUser(null);
     localStorage.removeItem("oma_token");
     localStorage.removeItem("oma_user");
-  }, []);
+    window.location.replace("/login");
+  }, [token]);
 
   return (
     <AuthContext.Provider value={{ token, user, loading, login, register, logout }}>

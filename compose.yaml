@@ -9,6 +9,9 @@ services:
     restart: unless-stopped
     volumes:
       - backend_storage:/app/storage
+    networks:
+      - default
+      - omai_n8n_bridge
 
   frontend:
     build: ./frontend
@@ -33,3 +36,8 @@ services:
 volumes:
   postgres_data:
   backend_storage:
+
+networks:
+  omai_n8n_bridge:
+    external: true
+    name: omai_n8n_bridge

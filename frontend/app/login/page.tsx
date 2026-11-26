@@ -226,12 +226,12 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={busy}
-            className="min-h-12 w-full rounded-lg bg-white py-3 font-semibold text-black transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:opacity-50"
+            className="min-h-12 w-full rounded-lg bg-sky-300 py-3 font-semibold text-slate-950 transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy
               ? "Memproses..."
               : mode === "login"
-                ? "Login"
+                ? "Sign In"
                 : "Buat Akun"}
           </button>
 

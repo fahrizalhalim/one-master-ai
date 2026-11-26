@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/app/auth-context";
 import TelegramIcon from "@/app/telegram-icon";
+import AutomationPanel from "./automation-panel";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -42,6 +43,28 @@ type TokenRow = {
   daily_limit: number | null;
   daily_used: number;
   daily_remaining: number | null;
+};
+
+type TokenTransactionHistoryItem = {
+  id: string;
+  user_id: string;
+  email: string;
+  full_name: string;
+  transaction_type: string;
+  amount: number;
+  balance_after: number;
+  reference: string;
+  reservation_id: string | null;
+  description: string;
+  created_at: string | null;
+  amount_semantics: "actual_usage" | "balance_movement";
+};
+
+type TokenTransactionHistoryResponse = {
+  items: TokenTransactionHistoryItem[];
+  total: number;
+  limit: number;
+  offset: number;
 };
 
 type ReservationReview = {
@@ -163,10 +186,25 @@ export default function AdminPage() {
   | "packages"
   | "review"
   | "telegram-central"
+  | "automation"
 >("users");
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [tokenRows, setTokenRows] = useState<TokenRow[]>([]);
+  const [transactionHistory, setTransactionHistory] =
+    useState<TokenTransactionHistoryResponse>({
+      items: [],
+      total: 0,
+      limit: 25,
+      offset: 0,
+    });
+  const [historyUserId, setHistoryUserId] = useState("");
+  const [historyType, setHistoryType] = useState("");
+  const [historyOffset, setHistoryOffset] = useState(0);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [selectedHistoryIds, setSelectedHistoryIds] = useState<string[]>([]);
+
   const [pending, setPending] = useState<AdminUser[]>([]);
 
 const [telegramCentralReview, setTelegramCentralReview] =
@@ -254,6 +292,54 @@ if (tu.ok) {
       setError("Gagal memuat data admin.");
     }
   }, [token, headers, router]);
+
+  const loadTokenHistory = useCallback(async () => {
+    if (!token) return;
+
+    setHistoryLoading(true);
+    setHistoryError(null);
+
+    try {
+      const params = new URLSearchParams({
+        limit: String(transactionHistory.limit),
+        offset: String(historyOffset),
+      });
+      if (historyUserId) params.set("user_id", historyUserId);
+      if (historyType) params.set("transaction_type", historyType);
+
+      const response = await fetch(
+        `${API_URL}/api/v1/admin/tokens/history?${params.toString()}`,
+        { headers: headers() }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Gagal memuat riwayat transaksi (${response.status}).`);
+      }
+
+      setTransactionHistory(await response.json());
+    } catch (err) {
+      setHistoryError(
+        err instanceof Error ? err.message : "Gagal memuat riwayat transaksi."
+      );
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [
+    token,
+    headers,
+    historyUserId,
+    historyType,
+    historyOffset,
+    transactionHistory.limit,
+  ]);
+
+  useEffect(() => {
+    if (tab === "tokens" && token) loadTokenHistory();
+  }, [tab, token, loadTokenHistory]);
+  useEffect(() => {
+    const visibleIds = new Set(transactionHistory.items.map((item) => item.id));
+    setSelectedHistoryIds((prev) => prev.filter((id) => visibleIds.has(id)));
+  }, [transactionHistory.items]);
 
   useEffect(() => {
     if (!loading && !token) router.replace("/login");
@@ -380,6 +466,13 @@ if (tu.ok) {
   }
 
   async function resetTokenBalance(r: TokenRow) {
+    if (r.topup_balance < 0) {
+      window.alert(
+        `Saldo ${r.email} memiliki utang ${Math.abs(r.topup_balance).toLocaleString("id-ID")} token. Utang tidak dapat dihapus melalui reset saldo.`
+      );
+      return;
+    }
+
     const confirmed = window.confirm(
       `Reset saldo token ${r.email}?\n\n` +
       `Saldo saat ini: ${r.topup_balance.toLocaleString("id-ID")} token.\n` +
@@ -393,6 +486,84 @@ if (tu.ok) {
       method: "POST",
       body: {},
       successMessage: `Saldo token ${r.email} berhasil direset.`,
+    });
+  }
+
+  function toggleSelectHistoryItem(id: string) {
+    setSelectedHistoryIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  }
+
+  function toggleSelectAllHistory() {
+    const pageIds = transactionHistory.items.map((item) => item.id);
+    if (pageIds.length === 0) return;
+    const allSelected = pageIds.every((id) => selectedHistoryIds.includes(id));
+    if (allSelected) {
+      setSelectedHistoryIds((prev) => prev.filter((id) => !pageIds.includes(id)));
+    } else {
+      setSelectedHistoryIds((prev) => Array.from(new Set([...prev, ...pageIds])));
+    }
+  }
+
+  async function deleteSelectedTokenHistory() {
+    if (selectedHistoryIds.length === 0) {
+      setError("Pilih minimal satu riwayat transaksi token terlebih dahulu.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Hapus ${selectedHistoryIds.length} riwayat transaksi token terpilih?\n\n` +
+      "Tindakan ini hanya menghapus catatan riwayat transaksi dan tidak mengubah saldo token pengguna."
+    );
+    if (!confirmed) return;
+
+    requestAdminPassword({
+      title: `Konfirmasi penghapusan ${selectedHistoryIds.length} riwayat transaksi token`,
+      url: `${API_URL}/api/v1/admin/tokens/history/delete`,
+      method: "POST",
+      body: { transaction_ids: selectedHistoryIds },
+      successMessage: `${selectedHistoryIds.length} riwayat transaksi token berhasil dihapus.`,
+    });
+    setSelectedHistoryIds([]);
+  }
+
+  async function addDailyTokenLimit(r: TokenRow) {
+    const currentLimitLabel =
+      r.daily_limit === null ? "Tanpa batas" : `${r.daily_limit.toLocaleString("id-ID")} token/hari`;
+    const raw = window.prompt(
+      `Jumlah penambahan batas token harian untuk ${r.email} (saat ini: ${currentLimitLabel}):`,
+      "50000"
+    );
+
+    if (raw === null) return;
+
+    const amount = Number(raw.trim());
+
+    if (!Number.isSafeInteger(amount) || amount <= 0) {
+      setError("Jumlah penambahan batas harian harus bilangan bulat positif yang valid.");
+      return;
+    }
+
+    const nextLimit =
+      r.daily_limit === null ? null : r.daily_limit + amount;
+
+    const confirmed = window.confirm(
+      `Tambahkan +${amount.toLocaleString("id-ID")} ke batas token harian ${r.email}?\n\n` +
+      `Batas harian saat ini: ${currentLimitLabel}\n` +
+      (nextLimit === null
+        ? "Batas harian setelah penambahan: Tanpa batas"
+        : `Batas harian setelah penambahan: ${nextLimit.toLocaleString("id-ID")} token/hari`)
+    );
+
+    if (!confirmed) return;
+
+    requestAdminPassword({
+      title: `Konfirmasi penambahan +${amount.toLocaleString("id-ID")} batas token harian untuk ${r.email}`,
+      url: `${API_URL}/api/v1/admin/tokens/${r.user_id}/add-daily-limit`,
+      method: "POST",
+      body: { amount },
+      successMessage: `Batas token harian ${r.email} berhasil ditambahkan.`,
     });
   }
 
@@ -958,6 +1129,14 @@ if (tu.ok) {
             >
               🧩 Skill
             </button>
+            <button
+              onClick={() => setTab("automation")}
+              className={`min-w-max shrink-0 rounded-lg px-3 py-3 font-medium ${
+                tab === "automation" ? "bg-blue-600" : "text-gray-400"
+              }`}
+            >
+              ⚙️ Automation
+            </button>
                </div>
 
           {error && (
@@ -1183,6 +1362,10 @@ if (tu.ok) {
           const manualOnly =
             item.error_code === "telegram_delivery_uncertain";
 
+          const recoveryAllowed =
+            item.status === "needs_review" &&
+            item.error_code === "reservation_or_user_missing";
+
           return (
             <div
               key={item.update_id}
@@ -1202,16 +1385,18 @@ if (tu.ok) {
                   className={`rounded-full px-3 py-1 text-xs font-medium ${
                     manualOnly
                       ? "bg-red-900/50 text-red-300"
-                      : retryAllowed
+                      : recoveryAllowed || retryAllowed
                         ? "bg-amber-900/50 text-amber-300"
                         : "bg-gray-800 text-gray-300"
                   }`}
                 >
                   {manualOnly
                     ? "Pemeriksaan Manual"
-                    : retryAllowed
-                      ? "Dapat Dipulihkan"
-                      : "Sedang Diproses"}
+                    : recoveryAllowed
+                      ? "Perlu Recovery Terverifikasi"
+                      : retryAllowed
+                        ? "Dapat Dipulihkan"
+                        : "Sedang Diproses"}
                 </span>
               </div>
 
@@ -1255,6 +1440,38 @@ if (tu.ok) {
                   Pengiriman sebelumnya mungkin sudah diterima pengguna.
                   Jangan kirim ulang secara otomatis untuk mencegah pesan
                   ganda. Periksa riwayat pengiriman secara manual.
+                </div>
+              )}
+
+              {recoveryAllowed && (
+                <div className="mt-3 rounded-lg border border-amber-700/50 bg-amber-950/20 p-3">
+                  <p className="text-sm font-medium text-amber-300">
+                    Jawaban AI tersimpan menunggu pemulihan
+                  </p>
+                  <p className="mt-1 text-xs text-gray-300">
+                    Backend akan memverifikasi kepemilikan akun, link Telegram,
+                    pesan assistant, reservasi, dan settlement sebelum mengirim
+                    jawaban yang sudah tersimpan. Tindakan ini tidak menjalankan
+                    AI dan tidak melakukan penagihan token ulang.
+                  </p>
+                  <button
+                    onClick={() =>
+                      requestAdminPassword({
+                        title:
+                          `Pulihkan jawaban tersimpan untuk Update ID ${item.update_id}. ` +
+                          "Backend akan memvalidasi bukti reservasi, settlement, pesan, dan kepemilikan sebelum mengirim.",
+                        url:
+                          `${API_URL}/api/v1/admin/telegram-central/` +
+                          `${item.update_id}/recover-saved-reply`,
+                        method: "POST",
+                        body: {},
+                        successMessage: "Recovery jawaban tersimpan diproses.",
+                      })
+                    }
+                    className="mt-3 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-500"
+                  >
+                    Verifikasi & Pulihkan Jawaban Tersimpan
+                  </button>
                 </div>
               )}
 
@@ -1909,27 +2126,49 @@ if (tu.ok) {
                             : r.daily_remaining.toLocaleString("id-ID")}
                         </p>
                       </td>
-                      <td className="px-4 py-3 text-right font-semibold text-emerald-300">
-                        {r.topup_balance.toLocaleString("id-ID")}
+                      <td className={`px-4 py-3 text-right font-semibold ${r.topup_balance < 0 ? "text-red-400" : "text-emerald-300"}`}>
+                        {r.topup_balance < 0
+                          ? `Utang ${Math.abs(r.topup_balance).toLocaleString("id-ID")}`
+                          : r.topup_balance.toLocaleString("id-ID")}
                       </td>
                       <td className="px-4 py-3 text-center">
                         {r.role !== "admin" && (
-                          <div className="flex flex-wrap justify-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => addTokenBalance(r)}
-                            className="rounded-lg border border-emerald-700 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-950"
-                          >
-                            Tambah Saldo
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => resetTokenBalance(r)}
-                            disabled={r.topup_balance === 0}
-                            className="rounded-lg border border-red-700 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-950 disabled:cursor-not-allowed disabled:opacity-40"
-                          >
-                            Reset Saldo
-                          </button>
+                          <div className="inline-flex items-center justify-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => addTokenBalance(r)}
+                              title="Tambah Saldo"
+                              aria-label="Tambah Saldo"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-emerald-700 text-emerald-300 hover:bg-emerald-950"
+                            >
+                              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M10 4v12m6-6H4" />
+                              </svg>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => addDailyTokenLimit(r)}
+                              disabled={r.daily_limit === null}
+                              title="Tambah Batas Harian"
+                              aria-label="Tambah Batas Harian"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-blue-700 text-blue-300 hover:bg-blue-950 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M10 6v4l2.5 1.5M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z" />
+                              </svg>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => resetTokenBalance(r)}
+                              disabled={r.topup_balance <= 0}
+                              title="Reset Saldo"
+                              aria-label="Reset Saldo"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-700 text-red-300 hover:bg-red-950 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h5M16 16v-5h-5M5.6 13.4A6.5 6.5 0 0 0 16.5 10M14.4 6.6A6.5 6.5 0 0 0 3.5 10" />
+                              </svg>
+                            </button>
                           </div>
                         )}
                       </td>
@@ -1942,6 +2181,213 @@ if (tu.ok) {
                 di dashboard Sumopod Anda.
               </p>
             </div>
+          )}
+
+          {tab === "tokens" && (
+            <section className="mt-8 space-y-4 rounded-xl border border-gray-800 bg-gray-950/40 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold">Riwayat Transaksi Token</h2>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Catatan Top Up, reservasi, pemakaian aktual, refund, dan perubahan saldo.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={deleteSelectedTokenHistory}
+                    disabled={selectedHistoryIds.length === 0 || historyLoading}
+                    className="rounded-lg border border-red-700/70 bg-red-950/40 px-3 py-2 text-xs font-medium text-red-300 hover:bg-red-950 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Hapus Terpilih ({selectedHistoryIds.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={loadTokenHistory}
+                    disabled={historyLoading}
+                    className="rounded-lg border border-gray-700 px-3 py-2 text-xs hover:bg-gray-800 disabled:opacity-50"
+                  >
+                    {historyLoading ? "Memuat..." : "↻ Muat Ulang"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="text-xs text-gray-400">
+                  Pengguna
+                  <select
+                    value={historyUserId}
+                    onChange={(event) => {
+                      setHistoryUserId(event.target.value);
+                      setHistoryOffset(0);
+                    }}
+                    className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white"
+                  >
+                    <option value="">Semua pengguna</option>
+                    {tokenRows.map((row) => (
+                      <option key={row.user_id} value={row.user_id}>
+                        {row.email}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="text-xs text-gray-400">
+                  Jenis transaksi
+                  <select
+                    value={historyType}
+                    onChange={(event) => {
+                      setHistoryType(event.target.value);
+                      setHistoryOffset(0);
+                    }}
+                    className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white"
+                  >
+                    <option value="">Semua jenis</option>
+                    <option value="topup">Top Up</option>
+                    <option value="admin_topup">Penambahan Admin</option>
+                    <option value="reserve">Reservasi</option>
+                    <option value="usage">Pemakaian aktual</option>
+                    <option value="refund">Refund</option>
+                    <option value="admin_reset">Reset Admin</option>
+                  </select>
+                </label>
+              </div>
+
+              {historyError && (
+                <p className="rounded-lg border border-red-800 bg-red-950/40 p-3 text-sm text-red-300">
+                  {historyError}
+                </p>
+              )}
+
+              <div className="overflow-x-auto rounded-lg border border-gray-800">
+                <table className="w-full min-w-[950px] text-left text-xs">
+                  <thead className="bg-gray-900 text-gray-400">
+                    <tr>
+                      <th className="w-10 px-3 py-3 text-center">
+                        <input
+                          type="checkbox"
+                          aria-label="Pilih semua riwayat transaksi"
+                          checked={
+                            transactionHistory.items.length > 0 &&
+                            transactionHistory.items.every((item) =>
+                              selectedHistoryIds.includes(item.id)
+                            )
+                          }
+                          onChange={toggleSelectAllHistory}
+                          className="h-4 w-4 accent-blue-600"
+                        />
+                      </th>
+                      <th className="px-3 py-3">Waktu</th>
+                      <th className="px-3 py-3">Pengguna</th>
+                      <th className="px-3 py-3">Jenis</th>
+                      <th className="px-3 py-3 text-right">Nominal tercatat</th>
+                      <th className="px-3 py-3 text-right">Saldo setelahnya</th>
+                      <th className="px-3 py-3">Keterangan</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {transactionHistory.items.map((item) => (
+                      <tr key={item.id} className="border-t border-gray-800 align-top">
+                        <td className="px-3 py-3 text-center">
+                          <input
+                            type="checkbox"
+                            aria-label={`Pilih transaksi ${item.id}`}
+                            checked={selectedHistoryIds.includes(item.id)}
+                            onChange={() => toggleSelectHistoryItem(item.id)}
+                            className="h-4 w-4 accent-blue-600"
+                          />
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3 text-gray-400">
+                          {item.created_at
+                            ? new Date(item.created_at).toLocaleString("id-ID")
+                            : "—"}
+                        </td>
+                        <td className="px-3 py-3">
+                          <p className="font-medium text-gray-200">{item.email}</p>
+                          <p className="text-gray-500">{item.full_name || "—"}</p>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3 text-gray-300">
+                          {({
+                            topup: "Top Up",
+                            admin_topup: "Penambahan Admin",
+                            reserve: "Reservasi",
+                            usage: "Pemakaian aktual",
+                            refund: "Refund",
+                            admin_reset: "Reset Admin",
+                          } as Record<string, string>)[item.transaction_type] ||
+                            item.transaction_type}
+                          {item.amount_semantics === "actual_usage" && (
+                            <p className="mt-1 text-[10px] text-amber-300">
+                              Pemakaian aktual, bukan delta saldo
+                            </p>
+                          )}
+                        </td>
+                        <td className={`whitespace-nowrap px-3 py-3 text-right font-semibold ${
+                          item.amount < 0 ? "text-red-300" : "text-emerald-300"
+                        }`}>
+                          {item.amount > 0 ? "+" : ""}
+                          {item.amount.toLocaleString("id-ID")}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3 text-right text-gray-200">
+                          {item.balance_after.toLocaleString("id-ID")}
+                        </td>
+                        <td className="max-w-sm break-words px-3 py-3 text-gray-400">
+                          {item.description || "—"}
+                          {item.reservation_id && (
+                            <p className="mt-1 break-all text-[10px] text-gray-600">
+                              Reservasi: {item.reservation_id}
+                            </p>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {!historyLoading && transactionHistory.items.length === 0 && (
+                      <tr>
+                        <td colSpan={7} className="px-3 py-8 text-center text-gray-500">
+                          Belum ada transaksi untuk filter ini.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-gray-400">
+                <p>
+                  Menampilkan {transactionHistory.total === 0
+                    ? 0
+                    : transactionHistory.offset + 1}
+                  {"–"}
+                  {Math.min(
+                    transactionHistory.offset + transactionHistory.items.length,
+                    transactionHistory.total
+                  )}
+                  {" dari "}
+                  {transactionHistory.total.toLocaleString("id-ID")} transaksi
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    disabled={historyOffset <= 0 || historyLoading}
+                    onClick={() => setHistoryOffset((value) => Math.max(0, value - 25))}
+                    className="rounded-lg border border-gray-700 px-3 py-2 hover:bg-gray-800 disabled:opacity-40"
+                  >
+                    Sebelumnya
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      historyOffset + transactionHistory.limit >= transactionHistory.total ||
+                      historyLoading
+                    }
+                    onClick={() => setHistoryOffset((value) => value + 25)}
+                    className="rounded-lg border border-gray-700 px-3 py-2 hover:bg-gray-800 disabled:opacity-40"
+                  >
+                    Berikutnya
+                  </button>
+                </div>
+              </div>
+            </section>
           )}
 
           {/* Monitoring Review Token - baca saja */}
@@ -2105,6 +2551,10 @@ if (tu.ok) {
                 backend/app/skills/ lalu rebuild.
               </p>
             </div>
+          )}
+
+          {tab === "automation" && token && (
+            <AutomationPanel token={token} apiUrl={API_URL} users={users} />
           )}
         </div>
       )}
