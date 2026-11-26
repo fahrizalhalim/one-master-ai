@@ -2015,7 +2015,15 @@ async def central_telegram_webhook(
                         "pengujian, (8) pra-integritas: duplikasi internal, "
                         "indikasi gaya AI, kredensial, (9) checklist perbaikan "
                         "bernomor, (10) poin yang sudah bagus. Akhiri dengan "
-                        "keputusan kelayakan."
+                        "keputusan kelayakan. "
+                        "BATASAN PENTING: jangan mengulas gambar, foto, atau "
+                        "ilustrasi dalam naskah — gambar tidak terbaca dari "
+                        "ekstraksi teks dan jangan pernah mengarang isinya. "
+                        "Cukup ulas yang terbaca sebagai teks: tabel, bagan, "
+                        "grafik (beserta judul/keterangannya), dan standar "
+                        "penulisan sesuai pedoman/template. Untuk penilaian "
+                        "kualitas visual gambar, cukup catat satu baris: "
+                        "'kualitas gambar diperiksa manual oleh dosen'."
                     )
                     review_result = _chat_impl(
                         ChatRequest(
